@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
+import time
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Literal
 
@@ -14,6 +17,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from app.api.deps import SessionDep
+from app.core import metrics
 from app.models import Champion, Signal, Strategy
 from app.models.enums import ChampionStatus, DataSource, SignalKind, SignalStatus, Timeframe
 from app.services.champions import PromotionError, demote, evaluate_champions, promote
@@ -24,6 +28,7 @@ from engine.live.feeds import BarFeed, OandaFeed, ReplayFeed
 from engine.live.notify import Notifier, TelegramNotifier, WebhookNotifier
 
 router = APIRouter(tags=["live"])
+logger = logging.getLogger(__name__)
 
 
 def _champion_dict(c: Champion, s: Strategy) -> dict[str, Any]:
@@ -171,39 +176,93 @@ def notifiers_from_settings(settings: Any) -> list[Notifier]:
     return out
 
 
-@router.post("/live/start", status_code=status.HTTP_202_ACCEPTED)
-async def live_start(body: LiveStartRequest, request: Request) -> dict[str, Any]:
-    state = request.app.state
+def _make_service(state: Any, symbol: str, history_source: DataSource) -> LiveService:
+    return LiveService(
+        state.sessionmaker,
+        ParquetStore(state.settings.data_dir / "parquet"),
+        state.event_bus,
+        symbol=symbol,
+        history_source=history_source,
+        notifiers=notifiers_from_settings(state.settings),
+    )
+
+
+async def supervise_live(
+    state: Any,
+    stop: threading.Event,
+    make_feed: Callable[[], BarFeed],
+    *,
+    symbol: str,
+    history_source: DataSource,
+    min_backoff: float = 5.0,
+    max_backoff: float = 300.0,
+) -> None:
+    """Run the live engine until ``stop``; restart it with exponential backoff after a crash.
+
+    A run that stayed up for 10 minutes resets the backoff.
+    """
+    attempt = 0
+    while not stop.is_set():
+        service = _make_service(state, symbol, history_source)
+        service.status["supervised"] = True
+        state.live["service"] = service
+        started = time.monotonic()
+        try:
+            await service.run(make_feed(), stop)
+        except Exception as exc:
+            logger.exception("live engine crashed")
+            service.status["error"] = repr(exc)
+        if stop.is_set():
+            return
+        if time.monotonic() - started > 600:
+            attempt = 0
+        delay = min(max_backoff, min_backoff * 2**attempt)
+        attempt += 1
+        metrics.LIVE_RESTARTS.inc()
+        service.status["restarting_in_s"] = delay
+        logger.warning("restarting live engine", extra={"delay_s": delay, "attempt": attempt})
+        await asyncio.to_thread(stop.wait, delay)  # returns early when stop is set
+
+
+def start_live(state: Any, body: LiveStartRequest) -> dict[str, Any]:
+    """Start the engine in the background. OANDA runs are supervised (auto-restart)."""
     if getattr(state, "live", None) and not state.live["task"].done():
         raise HTTPException(status.HTTP_409_CONFLICT, "live engine already running")
     settings = state.settings
-    store = ParquetStore(settings.data_dir / "parquet")
-    feed: BarFeed
+    stop = threading.Event()
     if body.feed == "replay":
         if body.replay_start is None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "replay needs replay_start")
+        store = ParquetStore(settings.data_dir / "parquet")
         m1 = store.read_bars(body.symbol, Timeframe.M1, source=body.history_source)
         if m1.empty:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "no M1 bars to replay")
         feed = ReplayFeed(m1, pd.Timestamp(body.replay_start), bars_per_second=body.bars_per_second)
-    else:
-        feed = OandaFeed(
+        service = _make_service(state, body.symbol, body.history_source)
+        task = asyncio.create_task(service.run(feed, stop), name="live-engine")
+        state.live = {"task": task, "stop": stop, "service": service}
+        return {"started": True, "feed": body.feed}
+
+    def make_feed() -> BarFeed:
+        return OandaFeed(
             token=settings.oanda_token,
             account_id=settings.oanda_account_id,
             practice=settings.oanda_practice,
         )
-    service = LiveService(
-        state.sessionmaker,
-        store,
-        state.event_bus,
-        symbol=body.symbol,
-        history_source=body.history_source,
-        notifiers=notifiers_from_settings(settings),
+
+    state.live = {"stop": stop, "service": _make_service(state, body.symbol, body.history_source)}
+    state.live["task"] = asyncio.create_task(
+        supervise_live(
+            state, stop, make_feed, symbol=body.symbol, history_source=body.history_source
+        ),
+        name="live-supervisor",
     )
-    stop = threading.Event()
-    task = asyncio.create_task(service.run(feed, stop), name="live-engine")
-    state.live = {"task": task, "stop": stop, "service": service}
-    return {"started": True, "feed": body.feed}
+    return {"started": True, "feed": body.feed, "supervised": True}
+
+
+@router.post("/live/start", status_code=status.HTTP_202_ACCEPTED)
+async def live_start(body: LiveStartRequest, request: Request) -> dict[str, Any]:
+    return start_live(request.app.state, body)
 
 
 @router.post("/live/stop")

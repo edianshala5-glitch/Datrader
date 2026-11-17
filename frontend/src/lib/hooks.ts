@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { WS_URL } from "./api";
+import { api, wsBase } from "./api";
+import { getToken, requireLogin } from "./auth";
 import type { BusEvent } from "./types";
 
 /** Fetch on mount (and on `deps` change); `reload()` refetches. Optional polling. */
@@ -38,12 +39,22 @@ export function useStream(channel: "lab" | "signals" | "jobs" | "system", onEven
     let attempt = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const connect = () => {
-      ws = new WebSocket(`${WS_URL}/api/v1/ws/${channel}`);
-      ws.onopen = () => { attempt = 0; setConnected(true); };
+      // Browsers can't set headers on a WebSocket, so the token goes in the query string.
+      const token = getToken();
+      const q = token ? `?token=${encodeURIComponent(token)}` : "";
+      ws = new WebSocket(`${wsBase()}/api/v1/ws/${channel}${q}`);
+      let opened = false;
+      ws.onopen = () => { opened = true; attempt = 0; setConnected(true); };
       ws.onmessage = (m) => { try { cb.current(JSON.parse(m.data as string) as BusEvent); } catch { /* ignore */ } };
       ws.onclose = () => {
         setConnected(false);
         if (closed) return;
+        // A handshake refused for auth reaches the browser as a bare 1006, so ask the API.
+        if (!opened) {
+          api.session()
+            .then((s) => { if (s.auth_enabled && !s.authenticated) requireLogin(); })
+            .catch(() => { /* API down: keep retrying */ });
+        }
         timer = setTimeout(connect, Math.min(15000, 500 * 2 ** attempt++));
       };
     };

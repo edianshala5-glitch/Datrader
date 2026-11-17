@@ -6,7 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -47,6 +47,57 @@ class Settings(BaseSettings):
     notify_webhook_url: str | None = None
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
+
+    # Single-user auth. Enabled when a password hash is set (`swarm hash-password`).
+    auth_password_hash: SecretStr | None = None
+    # Signs session tokens. Required with auth in prod; in dev a random per-process key is used.
+    secret_key: SecretStr | None = None
+    token_ttl_hours: int = Field(24 * 7, ge=1)
+    # Prod refuses to start without auth unless this is set (e.g. bound to localhost only).
+    auth_disabled: bool = False
+    login_max_failures: int = Field(5, ge=1)
+    login_lockout_seconds: int = Field(900, ge=1)
+
+    metrics_enabled: bool = True
+    docs_enabled: bool = True
+
+    # Start the OANDA live engine with the API and restart it after crashes.
+    live_autostart: bool = False
+    live_history_source: str = "dukascopy"
+
+    @model_validator(mode="after")
+    def _check_prod(self) -> Settings:
+        if self.environment == "prod" and not self.auth_disabled:
+            missing = [
+                name
+                for name, value in (
+                    ("SWARM_AUTH_PASSWORD_HASH", self.auth_password_hash),
+                    ("SWARM_SECRET_KEY", self.secret_key),
+                )
+                if value is None or not value.get_secret_value()
+            ]
+            placeholders = [
+                name
+                for name, value in (
+                    ("SWARM_AUTH_PASSWORD_HASH", self.auth_password_hash),
+                    ("SWARM_SECRET_KEY", self.secret_key),
+                )
+                if value is not None and "replace" in value.get_secret_value().lower()
+            ]
+            if placeholders:
+                raise ValueError(f"{' and '.join(placeholders)} still hold example values")
+            if missing:
+                raise ValueError(
+                    f"prod needs {' and '.join(missing)} (or SWARM_AUTH_DISABLED=true "
+                    "when the API is reachable only from this machine)"
+                )
+        if self.secret_key is not None and 0 < len(self.secret_key.get_secret_value()) < 32:
+            raise ValueError("SWARM_SECRET_KEY must be at least 32 characters")
+        return self
+
+    @property
+    def auth_enabled(self) -> bool:
+        return bool(self.auth_password_hash and self.auth_password_hash.get_secret_value())
 
     @property
     def is_sqlite(self) -> bool:

@@ -8,6 +8,7 @@ import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
+from app.core import metrics
 from app.core.events import Channel, EventBus
 
 router = APIRouter(tags=["stream"])
@@ -27,6 +28,8 @@ async def stream(websocket: WebSocket, channel: str) -> None:
     # Subscribe before accepting so nothing published after the handshake is missed.
     async with bus.subscribe(chan) as events:
         await websocket.accept()
+        gauge = metrics.WS_CONNECTIONS.labels(chan.value)
+        gauge.inc()
 
         async def pump() -> None:
             async for event in events:
@@ -40,13 +43,16 @@ async def stream(websocket: WebSocket, channel: str) -> None:
 
         pump_task = asyncio.create_task(pump())
         watch_task = asyncio.create_task(watch_disconnect())
-        done, pending = await asyncio.wait(
-            {pump_task, watch_task}, return_when=asyncio.FIRST_COMPLETED
-        )
-        for task in pending:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, WebSocketDisconnect):
-                await task
-        for task in done:
-            if (exc := task.exception()) and not isinstance(exc, WebSocketDisconnect):
-                logger.warning("websocket stream ended with error", exc_info=exc)
+        try:
+            done, pending = await asyncio.wait(
+                {pump_task, watch_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, WebSocketDisconnect):
+                    await task
+            for task in done:
+                if (exc := task.exception()) and not isinstance(exc, WebSocketDisconnect):
+                    logger.warning("websocket stream ended with error", exc_info=exc)
+        finally:
+            gauge.dec()

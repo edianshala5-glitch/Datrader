@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -50,8 +51,30 @@ def cmd_seed(_: argparse.Namespace) -> None:
 
 
 def _parse_date(value: str) -> datetime:
+    if value == "now":
+        return datetime.now(UTC)
     dt = datetime.fromisoformat(value)
     return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
+def resolve_ingest_start(value: str, store: Any, symbol: str, source: str) -> datetime:
+    """``last`` = re-fetch from the start of the newest stored day (incremental updates).
+
+    Re-ingesting overlapping bars is safe: partitions merge on ``ts``, and Dukascopy files
+    for incomplete periods are never cached.
+    """
+    if value != "last":
+        return _parse_date(value)
+    import pandas as pd
+
+    from app.models.enums import DataSource, Timeframe
+
+    cov = store.bar_coverage(symbol, Timeframe.M1, DataSource(source))
+    if not cov.rows or cov.end is None:
+        raise SystemExit(f"--start last: no stored {source} M1 bars for {symbol}; give a date")
+    end = pd.Timestamp(cov.end)
+    end = end.tz_localize("UTC") if end.tzinfo is None else end.tz_convert("UTC")
+    return end.normalize().to_pydatetime()
 
 
 async def _ingest(args: argparse.Namespace) -> None:
@@ -68,7 +91,11 @@ async def _ingest(args: argparse.Namespace) -> None:
         XAUUSD.session_timezone, XAUUSD.trading_hours.model_dump(mode="json")
     )
     store = ParquetStore(settings.data_dir / "parquet")
-    start, end = _parse_date(args.start), _parse_date(args.end)
+    start = resolve_ingest_start(args.start, store, symbol, args.source)
+    end = _parse_date(args.end)
+    if start >= end:
+        print(f"nothing to do: start {start.isoformat()} >= end {end.isoformat()}")
+        return
     engine = create_engine(settings.database_url)
     client = None
     try:
@@ -640,6 +667,29 @@ def cmd_live(args: argparse.Namespace) -> None:
     asyncio.run(_live(args))
 
 
+def cmd_hash_password(args: argparse.Namespace) -> None:
+    import getpass
+
+    from app.core.security import hash_password
+
+    if args.stdin:
+        password = sys.stdin.readline().rstrip("\n")
+    else:
+        password = getpass.getpass("Dashboard password: ")
+        if getpass.getpass("Repeat: ") != password:
+            raise SystemExit("passwords differ")
+    try:
+        print(hash_password(password))
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def cmd_gen_secret(args: argparse.Namespace) -> None:
+    import secrets
+
+    print(secrets.token_urlsafe(48))
+
+
 def cmd_serve(args: argparse.Namespace) -> None:
     import uvicorn
 
@@ -667,6 +717,13 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("seed", help="upsert reference data (instruments)")
     p.set_defaults(func=cmd_seed)
 
+    p = sub.add_parser("hash-password", help="make SWARM_AUTH_PASSWORD_HASH for dashboard login")
+    p.add_argument("--stdin", action="store_true", help="read the password from stdin")
+    p.set_defaults(func=cmd_hash_password)
+
+    p = sub.add_parser("gen-secret", help="print a random SWARM_SECRET_KEY")
+    p.set_defaults(func=cmd_gen_secret)
+
     p = sub.add_parser("serve", help="run the API server")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
@@ -676,8 +733,12 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("ingest", help="load historical data into the Parquet lake")
     p.add_argument("source", choices=["dukascopy", "csv", "synthetic"])
     p.add_argument("--symbol", default=settings.default_symbol)
-    p.add_argument("--start", required=True, help="ISO date/time, UTC if no offset")
-    p.add_argument("--end", required=True)
+    p.add_argument(
+        "--start",
+        required=True,
+        help="ISO date/time (UTC if no offset), or 'last' to continue from the newest stored day",
+    )
+    p.add_argument("--end", required=True, help="ISO date/time or 'now'")
     p.add_argument(
         "--mode",
         choices=["candles", "ticks"],

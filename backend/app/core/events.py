@@ -23,6 +23,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.core import metrics
+
 logger = logging.getLogger(__name__)
 
 
@@ -69,6 +71,7 @@ class InMemoryEventBus(EventBus):
         self._subscribers: dict[Channel, set[asyncio.Queue[Event]]] = defaultdict(set)
 
     async def publish(self, event: Event) -> None:
+        metrics.EVENTS.labels(event.channel.value, event.type).inc()
         for queue in list(self._subscribers[event.channel]):
             if queue.full():
                 with contextlib.suppress(asyncio.QueueEmpty):
@@ -110,6 +113,7 @@ class RedisEventBus(EventBus):
         await self._redis.aclose()
 
     async def publish(self, event: Event) -> None:
+        metrics.EVENTS.labels(event.channel.value, event.type).inc()
         await self._redis.publish(self._key(event.channel), event.model_dump_json())
 
     @contextlib.asynccontextmanager

@@ -1,0 +1,111 @@
+# Production stack for one small server (e.g. a free Oracle Cloud VM). See docs/DEPLOY.md.
+#   cp deploy/.env.prod.example deploy/.env    # fill it in
+#   make prod-up
+# Only Caddy is reachable from outside (80/443, automatic HTTPS). Everything else stays
+# on the internal network.
+
+x-backend-env: &backend-env
+  SWARM_ENVIRONMENT: prod
+  SWARM_LOG_JSON: "true"
+  SWARM_DATABASE_URL: postgresql+asyncpg://swarm:${POSTGRES_PASSWORD:?set in deploy/.env}@postgres:5432/swarm
+  SWARM_REDIS_URL: redis://redis:6379/0
+  SWARM_DATA_DIR: /app/data
+  SWARM_CORS_ORIGINS: '["https://${SWARM_DOMAIN:?set in deploy/.env}"]'
+  SWARM_DOCS_ENABLED: "false"
+
+x-logging: &logging
+  driver: json-file
+  options: {max-size: "10m", max-file: "5"}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: swarm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: swarm
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U swarm"]
+      interval: 10s
+      retries: 10
+    logging: *logging
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 10
+    logging: *logging
+
+  api:
+    build: ./backend
+    image: swarm-trader/api:local
+    restart: unless-stopped
+    env_file: [./deploy/.env]  # auth hash, secret key, OANDA token, alert channels
+    environment:
+      <<: *backend-env
+      FORWARDED_ALLOW_IPS: "*"  # trust X-Forwarded-For from Caddy (api is not exposed)
+    volumes: [./data:/app/data]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    logging: *logging
+
+  # Keeps the Parquet lake current: incremental Dukascopy download every 6 hours.
+  updater:
+    image: swarm-trader/api:local  # same image as the API, built once
+    pull_policy: never
+    restart: unless-stopped
+    env_file: [./deploy/.env]
+    environment: *backend-env
+    volumes: [./data:/app/data]
+    depends_on:
+      api: {condition: service_healthy}
+    command:
+      - sh
+      - -c
+      - |
+        while true; do
+          swarm ingest dukascopy --start last --end now --rps 2 || echo "update failed; retrying later"
+          sleep 21600
+        done
+    logging: *logging
+
+  web:
+    image: swarm-trader/web:local
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ""  # same origin: Caddy routes /api/* to the API
+    restart: unless-stopped
+    depends_on: [api]
+    logging: *logging
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      SWARM_DOMAIN: ${SWARM_DOMAIN}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [web, api]
+    logging: *logging
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

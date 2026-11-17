@@ -20,3 +20,7 @@ node_modules/
 .next/
 
 .DS_Store
+
+# Production secrets and backups
+deploy/.env
+backups/

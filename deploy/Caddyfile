@@ -1,0 +1,20 @@
+# Automatic HTTPS (Let's Encrypt) for SWARM_DOMAIN, e.g. mygold.duckdns.org.
+{$SWARM_DOMAIN} {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	# Prometheus metrics stay internal (scrape api:8000/metrics from inside the network).
+	handle /metrics {
+		respond 404
+	}
+	# REST + WebSockets (Caddy proxies upgrades automatically).
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+	handle {
+		reverse_proxy web:3000
+	}
+}

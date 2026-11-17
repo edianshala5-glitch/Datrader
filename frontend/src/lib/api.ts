@@ -1,10 +1,17 @@
+import { getToken, requireLogin } from "./auth";
 import type {
   BacktestRow, Bars, Champion, ContextRule, Dataset, Generation, Health, LiveStatus, Overlays,
   Page, Run, SignalRow, StrategyDetail, StrategySummary, TradeRow,
 } from "./types";
 
+// "" = same origin (behind the production reverse proxy); unset = local dev API.
 export const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
-export const WS_URL = API_URL.replace(/^http/, "ws");
+
+/** WebSocket base URL, derived from API_URL (or the page's own origin when same-origin). */
+export function wsBase(): string {
+  if (API_URL) return API_URL.replace(/^http/, "ws");
+  return `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`;
+}
 
 export class ApiError extends Error {
   constructor(public status: number, public detail: unknown) {
@@ -13,11 +20,17 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getToken();
   const res = await fetch(`${API_URL}/api/v1${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(init?.headers ?? {}),
+    },
     cache: "no-store",
   });
+  if (res.status === 401 && !path.startsWith("/auth/")) requireLogin();
   if (!res.ok) {
     let detail: unknown = res.statusText;
     try { detail = (await res.json()).detail; } catch { /* non-JSON error body */ }
@@ -39,6 +52,12 @@ const qs = (params: Record<string, string | number | boolean | undefined | null 
 
 export const api = {
   health: () => request<Health>("/health"),
+  session: () => request<{ auth_enabled: boolean; authenticated: boolean }>("/auth/session"),
+  login: (password: string) =>
+    request<{ token: string; expires_at: string }>("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ password }),
+    }),
   runs: (limit = 50) => request<Page<Run>>(`/runs${qs({ limit })}`),
   run: (id: string) => request<Run>(`/runs/${id}`),
   generations: (id: string) => request<Generation[]>(`/runs/${id}/generations`),

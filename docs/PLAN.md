@@ -94,7 +94,15 @@ Metadata: SQLite for zero setup, Postgres in docker-compose.
     per-fold table, validation gates, holdout, context rules and Promote.
 12. **Live Signals** ✅: champion roster, feed on `ws/signals`, chart overlays (entry / SL / TP),
     and a rationale panel ("all of" / "any of" conditions plus context filters).
-13. **Hardening**: auth, observability, CI, deployment docs.
+13. **Hardening** ✅:
+    - **Auth:** single-user login (scrypt hash, HMAC tokens, lockout), required in prod.
+    - **Observability:** request IDs, JSON access logs with token redaction, Prometheus metrics,
+      JSON 500s.
+    - **Live engine:** supervised, with auto-restart and optional autostart.
+    - **Data:** incremental ingest (`--start last`).
+    - **CI:** GitHub Actions for SQLite, Postgres + Redis, dashboard and Docker builds.
+    - **Deployment:** `docker-compose.prod.yml` with Caddy HTTPS, an updater and log rotation;
+      backup script; `docs/DEPLOY.md`.
 
 ## Design decisions
 

@@ -24,9 +24,10 @@ top 3 out-of-sample **Champions** drive a live signal feed.
 | 7 | Meta-Analyzer (context rules) | ✅ done |
 | 8 | Champions + live signaling | ✅ done |
 | 9–12 | Next.js dashboard: Lab, Leaderboard, Live Signals | ✅ done |
-| 13 | Hardening | next |
+| 13 | Hardening: auth, observability, CI, deployment | ✅ done |
 
-See [docs/PLAN.md](docs/PLAN.md) for the architecture and the full plan.
+See [docs/PLAN.md](docs/PLAN.md) for the architecture and the full plan, and
+[docs/DEPLOY.md](docs/DEPLOY.md) to run it on a free server with HTTPS.
 
 ## Quick start (no Docker needed)
 
@@ -245,6 +246,31 @@ charts, with a colour-blind-checked palette.
 docker compose up -d --build   # web on :3000, api on :8000, postgres on :5432, redis on :6379
 ```
 
+The local stack binds to 127.0.0.1 and runs without a login. For a server, use
+`docker-compose.prod.yml`: Caddy with automatic HTTPS, login required, an updater that pulls
+new Dukascopy data every 6 hours, and log rotation. See [docs/DEPLOY.md](docs/DEPLOY.md).
+
+### Login, logs and metrics
+
+- **Single-user login:**
+  - Set `SWARM_AUTH_PASSWORD_HASH` (`uv run swarm hash-password`) and `SWARM_SECRET_KEY`
+    (`uv run swarm gen-secret`).
+  - Every API route except `/health` and `/auth/*` then needs a bearer token from
+    `POST /api/v1/auth/login`. The dashboard shows a sign-in page.
+  - Prod refuses to start without both secrets, or with the placeholder values.
+  - After 5 failed logins, that client is locked out for 15 minutes.
+- **Logs:**
+  - One JSON line per request (`SWARM_LOG_JSON=true`) with `request_id`, route template,
+    status and duration.
+  - `X-Request-ID` is echoed on every response, and unhandled errors return it in a JSON 500.
+  - WebSocket tokens are masked in logs.
+- **Metrics:** Prometheus at `GET /metrics`: HTTP traffic and latency, live engine up, last-bar
+  age and restarts, bus events, login attempts.
+- **Live engine:** `SWARM_LIVE_AUTOSTART=true` starts the OANDA engine with the API under a
+  supervisor that restarts it after crashes.
+- **Incremental data:** `swarm ingest dukascopy --start last --end now` re-fetches from the
+  newest stored day.
+
 ## Tests
 
 ```bash
@@ -252,7 +278,11 @@ make test       # SQLite + in-memory event bus
 make test-all   # also PostgreSQL + Redis (needs `docker compose up -d postgres redis`)
 make lint typecheck
 make web-check   # strict TypeScript check of the dashboard
+make check       # all of the above
 ```
+
+GitHub Actions (`.github/workflows/ci.yml`) runs lint, types and tests on SQLite and on
+Postgres + Redis, builds the dashboard, and builds both Docker images on every push and PR.
 
 `test-all` uses a dedicated `swarm_test` database. The suite refuses to run against any
 database whose name doesn't end in `_test`.
@@ -269,7 +299,7 @@ backend/
     schemas/     Pydantic v2 API models + validators for instrument JSON config
     api/v1/      health, instruments, runs, strategies (leaderboard), WebSocket stream
     services/    seed data (XAUUSD definition), ingestion orchestration
-    cli.py       `swarm migrate | seed | serve | ingest | data … | backtest | validate | evolve | meta | promote | champions | live`
+    cli.py       `swarm migrate | seed | serve | hash-password | gen-secret | ingest | data … | backtest | validate | evolve | meta | promote | champions | live`
   engine/        quant core (no web deps)
     data/        calendar (NY sessions, 17:00 roll), US holidays, Parquet+DuckDB store,
                  resampling, quality reports, sources: dukascopy | csv (MT5) | synthetic
@@ -287,14 +317,19 @@ frontend/
   src/app/       pages: overview, lab, leaderboard, strategies/[id], signals, data
   src/components/  shell, UI kit, charts (candles, equity, line, scatter, heatmap)
   src/lib/       typed API client, fetch/WebSocket hooks, formatters
-docker-compose.yml
+deploy/          Caddyfile, prod env template, backup script
+docker-compose.yml        local stack (127.0.0.1, no login)
+docker-compose.prod.yml   server stack (Caddy HTTPS, login, updater)
+.github/workflows/ci.yml
 ```
 
 ## API
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/v1/health` | DB + event-bus health |
+| GET | `/api/v1/health` | DB + event-bus health (public) |
+| POST/GET | `/api/v1/auth/login`, `/auth/session` | sign in (bearer token), session state (public) |
+| GET | `/metrics` | Prometheus metrics |
 | GET | `/api/v1/instruments[/{symbol}]` | instrument specs, sessions, cost model |
 | GET | `/api/v1/runs`, `/runs/{id}`, `/runs/{id}/generations` | evolution runs (Lab) |
 | POST | `/api/v1/runs`, `/runs/{id}/stop`, `/runs/{id}/resume` | start / pause / resume a swarm run |

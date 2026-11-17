@@ -38,6 +38,10 @@ def configure_logging(level: str = "INFO", json_output: bool = False) -> None:
         handler.setFormatter(
             logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s", "%H:%M:%S")
         )
+    from app.core.observability import RedactTokensFilter, RequestIdFilter
+
+    handler.addFilter(RedactTokensFilter())
+    handler.addFilter(RequestIdFilter())
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(level.upper())
@@ -45,3 +49,5 @@ def configure_logging(level: str = "INFO", json_output: bool = False) -> None:
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         logging.getLogger(name).handlers.clear()
         logging.getLogger(name).propagate = True
+    # Our middleware writes one access line per request (with request ID and timing).
+    logging.getLogger("uvicorn.access").disabled = True

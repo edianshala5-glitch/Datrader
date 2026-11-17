@@ -1,7 +1,7 @@
 # Run from the repo root. Backend commands execute inside backend/ via uv.
 BACKEND := cd backend &&
 
-.PHONY: install dev test test-all lint typecheck migrate seed revision up down web-install web web-build web-check
+.PHONY: install dev test test-all lint typecheck migrate seed revision up down web-install web web-build web-check check prod-up prod-down prod-logs prod-backup
 
 install:            ## install backend deps (incl. dev tools)
 	$(BACKEND) uv sync
@@ -48,3 +48,19 @@ web-build:
 
 web-check:          ## strict TypeScript check of the dashboard
 	cd frontend && npm run typecheck
+
+check: lint typecheck test web-check   ## everything CI runs (except Postgres + docker)
+
+PROD := docker compose -f docker-compose.prod.yml --env-file deploy/.env
+
+prod-up:            ## build and start the production stack (needs deploy/.env)
+	$(PROD) up -d --build
+
+prod-down:
+	$(PROD) down
+
+prod-logs:
+	$(PROD) logs -f --tail=100 api updater
+
+prod-backup:
+	./deploy/backup.sh
