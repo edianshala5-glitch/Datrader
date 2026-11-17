@@ -31,7 +31,7 @@ structure, *guarantees* some spectacular backtests that are pure luck. So:
 
 | Purpose | Source | Notes |
 |---|---|---|
-| History (primary) | **Dukascopy** public datafeed | Free tick data with bid/ask, XAUUSD from ~2003. Hourly LZMA `.bi5` files. Resampled locally into M1→D1 bars. |
+| History (primary) | **Dukascopy** public datafeed | Free bid/ask data, XAUUSD from ~2003. M1 candle files (1/day/side) or hourly tick files, LZMA `.bi5`. Resampled locally into M1→D1 bars. Rate-limited: run big backfills from a home IP. |
 | History (cross-check) | HistData.com | Free M1 CSVs, for gap-filling and sanity checks. |
 | Your own exports | CSV loader | e.g. MT5 history exports from your broker. |
 | Live feed | OANDA v20 **practice** API | Free demo account, streaming XAU_USD prices. Feed interface is pluggable. |
@@ -43,9 +43,12 @@ Metadata: SQLite for zero setup, Postgres in docker-compose.
 
 1. **Backend & data models** ✅: settings, async SQLAlchemy models, Alembic, API skeleton,
    event bus, XAUUSD seed.
-2. **Data ingestion**: Dukascopy downloader (resumable, rate-limited, checksummed),
-   tick→bar resampler aligned to the 17:00 NY roll, quality reports (gaps, spikes, spreads),
-   `datasets` catalogue.
+2. **Data ingestion** ✅: Dukascopy downloader (resumable raw cache, global rate limit,
+   shared 429 cooldown, backoff), candle mode (2 req/day) and tick mode (1 req/open hour),
+   verified byte-exact against each other on real data. MT5/generic CSV import,
+   synthetic generator, tick→M1→higher-TF resampling aligned to the 17:00 NY roll, quality
+   reports (coverage, gaps, crossed quotes, spread distribution, bad prints vs large moves),
+   `datasets` catalogue, chart-bars API.
 3. **Indicator engine**: registry of standard indicators (RSI, MACD, ATR, BB, EMA, VWAP…),
    SMC: confirmed swings, BOS, CHoCH, FVG, order blocks, equal highs/lows, regular/hidden
    divergences, volatility/trend regime. Multi-timeframe features without leakage.

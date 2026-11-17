@@ -9,7 +9,8 @@ __pycache__/
 
 # Env & local data
 .env
-data/
+/data/
+/backend/data/
 *.db
 *.db-wal
 *.db-shm

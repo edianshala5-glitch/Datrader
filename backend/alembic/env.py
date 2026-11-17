@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from logging.config import fileConfig
+from pathlib import Path
 from typing import Any
 
 from alembic import context
 from sqlalchemy import JSON, BigInteger, pool
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 import app.models  # noqa: F401  (registers all tables)
@@ -24,6 +25,10 @@ if not config.get_main_option("sqlalchemy.url"):
     config.set_main_option("sqlalchemy.url", get_settings().database_url)
 
 target_metadata = Base.metadata
+
+_url = make_url(config.get_main_option("sqlalchemy.url") or "")
+if _url.get_backend_name() == "sqlite" and _url.database not in (None, "", ":memory:"):
+    Path(_url.database).parent.mkdir(parents=True, exist_ok=True)
 
 
 def render_item(type_: str, obj: Any, autogen_context: Any) -> str | bool:

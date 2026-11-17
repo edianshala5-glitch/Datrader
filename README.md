@@ -16,8 +16,8 @@ top 3 out-of-sample **Champions** drive a live signal feed.
 | Step | Module | State |
 |---|---|---|
 | 1 | Backend foundation & data models | ✅ done |
-| 2 | Data ingestion (Dukascopy ticks → Parquet) | next |
-| 3 | Indicator engine (standard + SMC, lookahead-safe) | |
+| 2 | Data ingestion (Dukascopy → Parquet lake, quality reports) | ✅ done |
+| 3 | Indicator engine (standard + SMC, lookahead-safe) | next |
 | 4 | Strategy DSL + numba backtester | |
 | 5 | Validation harness (walk-forward, Deflated Sharpe, PBO) | |
 | 6 | Optimization swarm (DEAP NSGA-II, islands) | |
@@ -39,6 +39,39 @@ uv run swarm serve      # http://127.0.0.1:8000/api/docs
 ```
 
 Or with the Makefile from the repo root: `make install && make dev`.
+
+### Loading XAUUSD history (free)
+
+```bash
+cd backend
+# M1 candles with bid/ask: 2 requests per trading day. ~10 years ≈ 5,200 requests.
+uv run swarm ingest dukascopy --start 2015-01-01 --end 2025-01-01
+# Raw ticks (1 request per open hour, ~12x more): exact intrabar fills + spread research.
+uv run swarm ingest dukascopy --mode ticks --start 2024-01-01 --end 2025-01-01
+uv run swarm data status
+```
+
+The downloader is resumable: every raw file is cached under `data/raw/dukascopy/`, so
+an interrupted run continues where it stopped. Dukascopy rate-limits (HTTP 429) and
+may reset connections. The client paces requests (`--rps`, default 4/s), pauses all
+workers together when throttled, and backs off exponentially. Run large backfills from
+a home connection: shared cloud IPs are throttled much harder.
+
+Other sources:
+
+```bash
+# Your broker's MT5 export (File → Save As in the History Center). NY-close servers: --tz NY+7
+uv run swarm ingest csv --path XAUUSD_M1.csv --tz NY+7 --start 2015-01-01 --end 2026-01-01
+# Synthetic XAUUSD-like data for offline development
+uv run swarm ingest synthetic --start 2023-01-01 --end 2025-01-01
+# Verify Dukascopy candles == ticks for one hour
+uv run swarm data crosscheck --hour 2024-01-02T14:00
+```
+
+Every ingest builds 5m / 15m / 30m / 1h / 4h / 1d bars from M1. D1 and 4h are aligned to
+the **17:00 New York** roll (D1 = 17:00→17:00 NY, 4h opens 17/21/01/05/09/13 NY all year).
+Each run writes a quality report covering coverage, gaps, crossed quotes, spreads and bad
+prints vs genuine large moves. You can see it via `GET /api/v1/data/XAUUSD/datasets`.
 
 ### Full stack (Postgres + Redis)
 
@@ -68,8 +101,11 @@ backend/
                  strategies (+lineage), backtests, trades, context rules, champions, signals
     schemas/     Pydantic v2 API models + validators for instrument JSON config
     api/v1/      health, instruments, runs, strategies (leaderboard), WebSocket stream
-    services/    seed data (XAUUSD definition)
-    cli.py       `swarm migrate | seed | serve`
+    services/    seed data (XAUUSD definition), ingestion orchestration
+    cli.py       `swarm migrate | seed | serve | ingest | data status | data crosscheck`
+  engine/        quant core (no web deps)
+    data/        calendar (NY sessions, 17:00 roll), Parquet+DuckDB store, resampling,
+                 quality reports, sources: dukascopy | csv (MT5) | synthetic
   alembic/       migrations (tested for drift against the models on SQLite and Postgres)
   tests/
 docker-compose.yml
@@ -84,4 +120,7 @@ docker-compose.yml
 | GET | `/api/v1/runs`, `/runs/{id}`, `/runs/{id}/generations` | evolution runs (Lab) |
 | GET | `/api/v1/strategies` | leaderboard with filters: timeframe, status, min trades/win rate/PF/DSR, max overfit risk/drawdown, sort |
 | GET | `/api/v1/strategies/{id}` | genome, lineage, metrics |
+| GET | `/api/v1/data/{symbol}/datasets` | data catalogue + quality reports |
+| GET | `/api/v1/data/{symbol}/bars` | chart bars (bid/ask/mid, any timeframe, column arrays) |
+| GET | `/api/v1/jobs[/{id}]` | background job progress |
 | WS | `/api/v1/ws/{lab\|signals\|jobs\|system}` | live event stream |
