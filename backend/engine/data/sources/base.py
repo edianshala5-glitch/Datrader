@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
+from itertools import pairwise
 from typing import Protocol
 
 import pandas as pd
@@ -32,10 +33,8 @@ class HistoricalSource(Protocol):
     def chunks(self, start: datetime, end: datetime) -> AsyncIterator[Chunk]: ...
 
 
-def month_windows(
-    start: datetime, end: datetime
-) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+def month_windows(start: datetime, end: datetime) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
     """Split [start, end) into calendar-month windows (UTC)."""
     s, e = pd.Timestamp(start).tz_convert("UTC"), pd.Timestamp(end).tz_convert("UTC")
     edges = [s, *pd.date_range(s.normalize() + pd.offsets.MonthBegin(1), e, freq="MS"), e]
-    return [(a, b) for a, b in zip(edges[:-1], edges[1:], strict=True) if a < b]
+    return [(a, b) for a, b in pairwise(edges) if a < b]

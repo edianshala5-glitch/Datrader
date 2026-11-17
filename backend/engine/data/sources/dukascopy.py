@@ -77,7 +77,8 @@ def candle_path(symbol: str, day: date, side: str) -> str:
     side = side.upper()
     if side not in ("BID", "ASK"):
         raise ValueError("side must be BID or ASK")
-    return f"{symbol.upper()}/{day.year:04d}/{day.month - 1:02d}/{day.day:02d}/{side}_candles_min_1.bi5"
+    folder = f"{symbol.upper()}/{day.year:04d}/{day.month - 1:02d}/{day.day:02d}"
+    return f"{folder}/{side}_candles_min_1.bi5"
 
 
 # --------------------------------------------------------------------------- codec
@@ -135,9 +136,7 @@ def decode_candles(raw: bytes, day_start: datetime, scale: int) -> pd.DataFrame:
     base = pd.Timestamp(day_start).tz_convert("UTC").as_unit("ns")
     return pd.DataFrame(
         {
-            "ts": (base + pd.to_timedelta(arr["sec"].astype(np.int64), unit="s")).astype(
-                TS_DTYPE
-            ),
+            "ts": (base + pd.to_timedelta(arr["sec"].astype(np.int64), unit="s")).astype(TS_DTYPE),
             "open": arr["open"] / scale,
             "high": arr["high"] / scale,
             "low": arr["low"] / scale,
@@ -392,7 +391,11 @@ class DukascopySource:
         days = pd.date_range(start.normalize(), end, freq="D", inclusive="left")
         # A UTC day is worth requesting if any of its hours trade.
         days = pd.DatetimeIndex(
-            [d for d in days if self.calendar.hour_has_trading(pd.date_range(d, periods=24, freq="h")).any()]
+            [
+                d
+                for d in days
+                if self.calendar.hour_has_trading(pd.date_range(d, periods=24, freq="h")).any()
+            ]
         )
         now = self._now()
 

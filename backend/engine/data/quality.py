@@ -2,7 +2,7 @@
 
 Checks:
 * coverage: share of expected open-market minutes that have a bar
-* gaps: runs of missing open-market minutes (holiday-season gaps flagged separately)
+* gaps: runs of missing open-market minutes (US-holiday / year-end gaps counted separately)
 * bars while the calendar says closed: calendar mismatch or bad data
 * duplicates / non-monotonic timestamps
 * crossed quotes (ask < bid) and inconsistent OHLC
@@ -18,18 +18,21 @@ import numpy as np
 import pandas as pd
 
 from engine.data.calendar import MarketCalendar
+from engine.data.holidays import is_us_holiday
 from engine.data.schema import mid
 
 # Gold trades thinly or not at all around Christmas / New Year; gaps there are expected.
 _HOLIDAY_WINDOWS = ((12, 24, 12, 26), (12, 31, 1, 2))
 
 
-def _is_holiday_season(ts: pd.Timestamp) -> bool:
+def _is_holiday_gap(ts_local: pd.Timestamp) -> bool:
+    """Gap starting on a US market holiday (NY date) or in the year-end season."""
+    if is_us_holiday(ts_local.date()):
+        return True
+    md = (ts_local.month, ts_local.day)
     for m1, d1, m2, d2 in _HOLIDAY_WINDOWS:
-        if m1 <= m2:
-            if (ts.month, ts.day) >= (m1, d1) and (ts.month, ts.day) <= (m2, d2):
-                return True
-        elif (ts.month, ts.day) >= (m1, d1) or (ts.month, ts.day) <= (m2, d2):
+        inside = (m1, d1) <= md <= (m2, d2) if m1 <= m2 else md >= (m1, d1) or md <= (m2, d2)
+        if inside:
             return True
     return False
 
@@ -95,7 +98,7 @@ def m1_quality_report(
             if len(run) < gap_min_minutes:
                 continue
             g_start = missing[run[0]]
-            if _is_holiday_season(g_start.tz_convert(calendar.tz)):
+            if _is_holiday_gap(g_start.tz_convert(calendar.tz)):
                 holiday_gaps += 1
                 continue
             gaps.append(
@@ -108,7 +111,7 @@ def m1_quality_report(
     gaps.sort(key=lambda g: g["minutes"], reverse=True)
     report["gaps"] = {
         "count": len(gaps),
-        "holiday_season": holiday_gaps,
+        "holiday": holiday_gaps,
         "largest": gaps[:max_examples],
     }
 

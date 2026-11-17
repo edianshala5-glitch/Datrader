@@ -49,10 +49,13 @@ Metadata: SQLite for zero setup, Postgres in docker-compose.
    synthetic generator, tick→M1→higher-TF resampling aligned to the 17:00 NY roll, quality
    reports (coverage, gaps, crossed quotes, spread distribution, bad prints vs large moves),
    `datasets` catalogue, chart-bars API.
-3. **Indicator engine**: US holiday / early-close calendar (real Jan-2024 data shows the
-   MLK-Day 14:30 NY close; such sessions get a context flag instead of being treated as gaps). registry of standard indicators (RSI, MACD, ATR, BB, EMA, VWAP…),
-   SMC: confirmed swings, BOS, CHoCH, FVG, order blocks, equal highs/lows, regular/hidden
-   divergences, volatility/trend regime. Multi-timeframe features without leakage.
+3. **Indicator engine** ✅: registry with typed params (GA ranges) and typed outputs (DSL
+   kinds). TradingView-compatible standard indicators. SMC: confirmed swings, BOS/CHoCH,
+   liquidity sweeps (level stays live after a sweep, found on real NFP data), EQH/EQL, FVG
+   with mitigation, order blocks, regular/hidden divergences. Context: trading-day weekday,
+   NY clock, US holiday/early-close calendar, sessions + kill zones, volatility/trend regime.
+   Leak-free multi-timeframe joins, Parquet feature cache, lookahead harness (proven to
+   catch leaks).
 4. **Strategy DSL + backtester**: JSON genome (entry condition tree, exits, SL/TP/trailing,
    session filters, sizing). numba event loop with next-bar-open fills and conservative
    intrabar SL/TP ordering.

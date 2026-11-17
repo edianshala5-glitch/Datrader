@@ -194,3 +194,51 @@ def test_data_api(tmp_path: Path) -> None:
         jobs = client.get("/api/v1/jobs", params={"kind": "ingest"}).json()
         assert len(jobs) == 1 and jobs[0]["status"] == "succeeded"
         assert client.get(f"/api/v1/jobs/{jobs[0]['id']}").json()["result"]["m1_rows"] > 0
+
+
+def test_indicator_catalog_and_overlays(tmp_path: Path) -> None:
+    url = f"sqlite+aiosqlite:///{tmp_path / 'api.db'}"
+    asyncio.run(_prepare(url, tmp_path))
+    settings = Settings(_env_file=None, database_url=url, data_dir=tmp_path)  # type: ignore[call-arg]
+    with TestClient(create_app(settings, event_bus=InMemoryEventBus())) as client:
+        catalog = {i["name"]: i for i in client.get("/api/v1/indicators").json()}
+        assert {"rsi", "structure", "fvg", "order_blocks", "divergence", "time", "sessions"} <= set(
+            catalog
+        )
+        assert catalog["rsi"]["params"]["length"] == {
+            "kind": "int",
+            "default": 14,
+            "low": 2,
+            "high": 100,
+            "step": 1,
+            "choices": None,
+        }
+        assert catalog["structure"]["outputs"]["choch_bull"]["kind"] == "event"
+        assert catalog["structure"]["outputs"]["trend"]["values"] == [-1, 0, 1]
+
+        ov = client.get(
+            "/api/v1/data/XAUUSD/overlays",
+            params={"timeframe": "5m", "source": "synthetic", "limit": 600},
+        ).json()
+        kinds = {m["kind"] for m in ov["markers"]}
+        assert {"swing_high", "swing_low"} <= kinds and kinds & {
+            "bos_bull",
+            "bos_bear",
+            "choch_bull",
+            "choch_bear",
+        }
+        # Swing markers sit on the pivot bar but are only knowable 5 *bars* later: 25 minutes,
+        # or more when the daily 17:00-18:00 NY break falls in between.
+        bars = client.get(
+            "/api/v1/data/XAUUSD/bars",
+            params={"timeframe": "5m", "source": "synthetic", "limit": 5000},
+        ).json()["time"]
+        pos = {t: i for i, t in enumerate(bars)}
+        for m in ov["markers"]:
+            if m["kind"].startswith("swing"):
+                assert pos[m["confirmed_time"]] - pos[m["time"]] == 5
+            else:
+                assert m["confirmed_time"] == m["time"]
+        assert ov["zones"] and all(z["top"] > z["bottom"] for z in ov["zones"])
+        empty = client.get("/api/v1/data/XAUUSD/overlays", params={"source": "csv"}).json()
+        assert empty["markers"] == [] and empty["zones"] == []

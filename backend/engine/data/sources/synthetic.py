@@ -1,7 +1,7 @@
 """Synthetic XAUUSD-like M1 data for tests, demos and offline development.
 
 Not a market model. It only reproduces the *shape* the pipeline must handle: the trading
-calendar (weekend close, daily 17:00–18:00 NY break), intraday volatility seasonality
+calendar (weekend close, daily 17:00-18:00 NY break), intraday volatility seasonality
 (London/NY sessions busier), fat-tailed returns, volatility clustering, and a
 time-varying bid/ask spread. Fully deterministic for a given seed.
 """

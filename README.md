@@ -17,8 +17,8 @@ top 3 out-of-sample **Champions** drive a live signal feed.
 |---|---|---|
 | 1 | Backend foundation & data models | ✅ done |
 | 2 | Data ingestion (Dukascopy → Parquet lake, quality reports) | ✅ done |
-| 3 | Indicator engine (standard + SMC, lookahead-safe) | next |
-| 4 | Strategy DSL + numba backtester | |
+| 3 | Indicator engine (standard + SMC, lookahead-safe) | ✅ done |
+| 4 | Strategy DSL + numba backtester | next |
 | 5 | Validation harness (walk-forward, Deflated Sharpe, PBO) | |
 | 6 | Optimization swarm (DEAP NSGA-II, islands) | |
 | 7 | Meta-Analyzer (context rules) | |
@@ -73,6 +73,26 @@ the **17:00 New York** roll (D1 = 17:00→17:00 NY, 4h opens 17/21/01/05/09/13 N
 Each run writes a quality report covering coverage, gaps, crossed quotes, spreads and bad
 prints vs genuine large moves. You can see it via `GET /api/v1/data/XAUUSD/datasets`.
 
+### Indicators
+
+19 indicators / 82 typed outputs, all computed on mid prices:
+
+| Category | Indicators |
+|---|---|
+| Trend / momentum | EMA, SMA, MACD, ADX (+DI/-DI), Donchian, RSI, Stochastic, ROC |
+| Volatility / volume | ATR, Bollinger Bands, session VWAP (anchored at 17:00 NY) |
+| Smart Money Concepts | swings (HH/LL), structure (BOS, CHoCH, liquidity sweeps, EQH/EQL), fair value gaps (with mitigation), order blocks, regular/hidden divergences (RSI or MACD) |
+| Context | trading-day weekday, NY hour/minute, US holidays, sessions + ICT kill zones, volatility & trend regime |
+
+- **TradingView-compatible** formulas (SMA-seeded RMA/EMA, population-stdev Bollinger).
+- **No lookahead, enforced:** swing-based events are emitted at their *confirmation* bar.
+  A test computes every indicator on full and truncated history and requires identical
+  values. A second test proves that check fails on deliberately leaky indicators.
+- **Multi-timeframe** joins only use higher-timeframe bars that were complete at decision time.
+- Full set on 10 years of 5m bars (720k) in ~1.2 s, with a Parquet feature cache.
+- `GET /api/v1/indicators` (catalog with param ranges and output types) and
+  `GET /api/v1/data/{symbol}/overlays` (BOS/CHoCH/sweep markers, FVG zones for charts).
+
 ### Full stack (Postgres + Redis)
 
 ```bash
@@ -104,8 +124,10 @@ backend/
     services/    seed data (XAUUSD definition), ingestion orchestration
     cli.py       `swarm migrate | seed | serve | ingest | data status | data crosscheck`
   engine/        quant core (no web deps)
-    data/        calendar (NY sessions, 17:00 roll), Parquet+DuckDB store, resampling,
-                 quality reports, sources: dukascopy | csv (MT5) | synthetic
+    data/        calendar (NY sessions, 17:00 roll), US holidays, Parquet+DuckDB store,
+                 resampling, quality reports, sources: dukascopy | csv (MT5) | synthetic
+    indicators/  registry (typed params/outputs), numba kernels, standard, SMC, context,
+                 multi-timeframe alignment, feature matrices + cache
   alembic/       migrations (tested for drift against the models on SQLite and Postgres)
   tests/
 docker-compose.yml
@@ -122,5 +144,7 @@ docker-compose.yml
 | GET | `/api/v1/strategies/{id}` | genome, lineage, metrics |
 | GET | `/api/v1/data/{symbol}/datasets` | data catalogue + quality reports |
 | GET | `/api/v1/data/{symbol}/bars` | chart bars (bid/ask/mid, any timeframe, column arrays) |
+| GET | `/api/v1/data/{symbol}/overlays` | SMC markers + FVG zones for charts |
+| GET | `/api/v1/indicators` | indicator catalog (params, ranges, output types) |
 | GET | `/api/v1/jobs[/{id}]` | background job progress |
 | WS | `/api/v1/ws/{lab\|signals\|jobs\|system}` | live event stream |

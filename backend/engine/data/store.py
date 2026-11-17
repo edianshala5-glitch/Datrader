@@ -65,7 +65,9 @@ class ParquetStore:
         )
 
     def tick_partition(self, symbol: str, source: DataSource, year: int, month: int) -> Path:
-        return self._tick_dir(symbol, source) / f"year={year}" / f"month={month:02d}" / "part.parquet"
+        return (
+            self._tick_dir(symbol, source) / f"year={year}" / f"month={month:02d}" / "part.parquet"
+        )
 
     def bar_partition(
         self, symbol: str, source: DataSource, timeframe: Timeframe, year: int
