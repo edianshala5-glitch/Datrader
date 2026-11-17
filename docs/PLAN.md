@@ -56,9 +56,13 @@ Metadata: SQLite for zero setup, Postgres in docker-compose.
    NY clock, US holiday/early-close calendar, sessions + kill zones, volatility/trend regime.
    Leak-free multi-timeframe joins, Parquet feature cache, lookahead harness (proven to
    catch leaks).
-4. **Strategy DSL + backtester**: JSON genome (entry condition tree, exits, SL/TP/trailing,
-   session filters, sizing). numba event loop with next-bar-open fills and conservative
-   intrabar SL/TP ordering.
+4. **Strategy DSL + backtester** ✅: pydantic genome typed against the indicator registry
+   (rejects meaningless rules), compiler to signal arrays with leak-free HTF features,
+   numba simulator (next-open fills at bid/ask, stop-first on ambiguous bars, gap fills,
+   trailing stops, session flats, costs, risk-based sizing), daily-return metrics, entry
+   context per trade, persistence, explain(), templates. Integrity: truncation test and
+   zero-edge random-walk test (which caught and fixed a wick artifact in the synthetic
+   generator).
 5. **Validation**: walk-forward, purged/embargoed CV, holdout lock, DSR, PBO, bootstrap CIs,
    parameter-perturbation robustness → `overfit_risk`.
 6. **Swarm**: DEAP NSGA-II over (OOS Sortino, max DD, trade count, fold stability), island

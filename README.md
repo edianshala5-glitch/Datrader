@@ -18,8 +18,8 @@ top 3 out-of-sample **Champions** drive a live signal feed.
 | 1 | Backend foundation & data models | ✅ done |
 | 2 | Data ingestion (Dukascopy → Parquet lake, quality reports) | ✅ done |
 | 3 | Indicator engine (standard + SMC, lookahead-safe) | ✅ done |
-| 4 | Strategy DSL + numba backtester | next |
-| 5 | Validation harness (walk-forward, Deflated Sharpe, PBO) | |
+| 4 | Strategy DSL + numba backtester | ✅ done |
+| 5 | Validation harness (walk-forward, Deflated Sharpe, PBO) | next |
 | 6 | Optimization swarm (DEAP NSGA-II, islands) | |
 | 7 | Meta-Analyzer (context rules) | |
 | 8 | Champions + live signaling | |
@@ -93,6 +93,34 @@ prints vs genuine large moves. You can see it via `GET /api/v1/data/XAUUSD/datas
 - `GET /api/v1/indicators` (catalog with param ranges and output types) and
   `GET /api/v1/data/{symbol}/overlays` (BOS/CHoCH/sweep markers, FVG zones for charts).
 
+### Strategies & backtesting
+
+Strategies are JSON **genomes** with condition trees (`compare`, `cross`, `event within N
+bars`, `flag`, `state`, `range`) over typed indicator outputs, plus exits (ATR / swing /
+percent stop, R or ATR target, ATR trailing stop, max bars, exit signal, flat before
+17:00 NY). Invalid combinations (e.g. `EMA > 2000`, `RSI > 140`) are rejected at
+validation time. Every genome renders as plain English.
+
+```bash
+uv run swarm backtest --template smc_choch_fvg --timeframe 5m --start 2024-01-08 --end 2024-02-01
+uv run swarm backtest --genome my_strategy.json --timeframe 15m --start 2023-01-01 --end 2024-01-01
+```
+
+The execution model is deliberately conservative:
+- Decisions happen at a bar's close and fill at the next open: buys at the ask, sells at the bid.
+- Stops trigger on the bid low (longs) or ask high (shorts). A gap through a stop fills at the open.
+- A bar that touches both stop and target counts as a stop.
+- Commission, slippage and a spread floor are always charged. Position size comes from the
+  risk per trade.
+
+Integrity tests:
+- Trades are identical with or without future bars (no look-ahead).
+- On edge-free synthetic data, expectancy is zero without costs and negative with costs.
+
+Speed: ~65 ms per backtest over 10 years of 5m bars once features are cached.
+Templates (`smc_choch_fvg`, `sweep_reversal`, `ema_pullback`, `divergence_bbands`) seed the
+GA. Untuned, they all lose after costs on real data, which is the baseline the swarm must beat.
+
 ### Full stack (Postgres + Redis)
 
 ```bash
@@ -122,12 +150,14 @@ backend/
     schemas/     Pydantic v2 API models + validators for instrument JSON config
     api/v1/      health, instruments, runs, strategies (leaderboard), WebSocket stream
     services/    seed data (XAUUSD definition), ingestion orchestration
-    cli.py       `swarm migrate | seed | serve | ingest | data status | data crosscheck`
+    cli.py       `swarm migrate | seed | serve | ingest | data … | backtest`
   engine/        quant core (no web deps)
     data/        calendar (NY sessions, 17:00 roll), US holidays, Parquet+DuckDB store,
                  resampling, quality reports, sources: dukascopy | csv (MT5) | synthetic
     indicators/  registry (typed params/outputs), numba kernels, standard, SMC, context,
                  multi-timeframe alignment, feature matrices + cache
+    strategy/    genome DSL (pydantic), compiler → signal arrays, explain, templates
+    backtest/    numba simulator, metrics (daily Sharpe/Sortino, PF, R stats), runner
   alembic/       migrations (tested for drift against the models on SQLite and Postgres)
   tests/
 docker-compose.yml
@@ -146,5 +176,7 @@ docker-compose.yml
 | GET | `/api/v1/data/{symbol}/bars` | chart bars (bid/ask/mid, any timeframe, column arrays) |
 | GET | `/api/v1/data/{symbol}/overlays` | SMC markers + FVG zones for charts |
 | GET | `/api/v1/indicators` | indicator catalog (params, ranges, output types) |
+| POST | `/api/v1/backtest` | run a genome over a window (metrics, equity, trades) |
+| GET | `/api/v1/strategy-templates` | starter genomes with explanations |
 | GET | `/api/v1/jobs[/{id}]` | background job progress |
 | WS | `/api/v1/ws/{lab\|signals\|jobs\|system}` | live event stream |

@@ -101,6 +101,10 @@ def _time(inp: Inputs) -> Outputs:
     needs_calendar=True,
 )
 def _sessions(inp: Inputs) -> Outputs:
+    if not inp.sessions:
+        # Fail loudly: silently returning "never in session" would make every
+        # session-filtered strategy look like it simply never trades.
+        raise ValueError("sessions indicator needs the instrument's session definitions")
     out: Outputs = {}
     for key in (
         "asia",

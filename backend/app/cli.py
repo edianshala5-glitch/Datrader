@@ -178,6 +178,63 @@ def cmd_data_crosscheck(args: argparse.Namespace) -> None:
     asyncio.run(_crosscheck(args))
 
 
+def cmd_backtest(args: argparse.Namespace) -> None:
+    import json
+
+    import pandas as pd
+
+    from app.models.enums import DataSource, Timeframe
+    from app.services.backtests import load_bars_with_warmup
+    from app.services.seed import XAUUSD
+    from engine.backtest.runner import CostConfig, run_backtest
+    from engine.data.calendar import MarketCalendar
+    from engine.data.store import ParquetStore
+    from engine.strategy.explain import explain
+    from engine.strategy.genome import Genome
+    from engine.strategy.templates import template
+
+    genome = (
+        Genome.model_validate_json(Path(args.genome).read_text())
+        if args.genome
+        else template(args.template)
+    )
+    tf = Timeframe(args.timeframe)
+    start, end = pd.Timestamp(_parse_date(args.start)), pd.Timestamp(_parse_date(args.end))
+    store = ParquetStore(get_settings().data_dir / "parquet")
+    source = DataSource(args.source)
+    bars = load_bars_with_warmup(store, args.symbol.upper(), tf, source, start, end)
+    if bars.empty:
+        raise SystemExit(f"no {tf} bars for {args.symbol} ({source}); run `swarm ingest` first")
+    htf = {
+        f.timeframe: load_bars_with_warmup(
+            store, args.symbol.upper(), f.timeframe, source, start, end, 500
+        )
+        for f in genome.features()
+        if f.timeframe
+    }
+    cal = MarketCalendar.from_instrument_config(
+        XAUUSD.session_timezone, XAUUSD.trading_hours.model_dump(mode="json")
+    )
+    run = run_backtest(
+        genome,
+        bars,
+        tf,
+        calendar=cal,
+        sessions=XAUUSD.model_dump(mode="json")["sessions"],
+        costs=CostConfig.from_instrument(XAUUSD),
+        htf_bars=htf,
+        start=start,
+        end=end,
+    )
+    print(explain(genome))
+    print(f"\n{run.period_start} -> {run.period_end}  ({tf}, {source})")
+    m = {k: (round(v, 4) if isinstance(v, float) else v) for k, v in run.metrics.items()}
+    print(json.dumps(m, indent=2, default=str))
+    if args.trades_csv:
+        run.trades.drop(columns=["context"], errors="ignore").to_csv(args.trades_csv, index=False)
+        print(f"trades written to {args.trades_csv}")
+
+
 def cmd_serve(args: argparse.Namespace) -> None:
     import uvicorn
 
@@ -240,6 +297,20 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--symbol", default=settings.default_symbol)
     p.add_argument("--hour", default="2024-01-02T14:00", help="UTC hour start")
     p.set_defaults(func=cmd_data_crosscheck)
+
+    p = sub.add_parser("backtest", help="backtest a template or genome JSON file")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument(
+        "--template", help="smc_choch_fvg | sweep_reversal | ema_pullback | divergence_bbands"
+    )
+    g.add_argument("--genome", help="path to a genome JSON file")
+    p.add_argument("--symbol", default=settings.default_symbol)
+    p.add_argument("--timeframe", default="15m")
+    p.add_argument("--source", default="dukascopy")
+    p.add_argument("--start", required=True)
+    p.add_argument("--end", required=True)
+    p.add_argument("--trades-csv", help="optional path to write the trade list")
+    p.set_defaults(func=cmd_backtest)
 
     args = parser.parse_args(argv)
     args.func(args)

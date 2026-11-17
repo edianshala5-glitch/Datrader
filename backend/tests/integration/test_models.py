@@ -233,3 +233,46 @@ async def test_naive_datetime_rejected(session: AsyncSession, xauusd: Instrument
     session.add(Champion(strategy=s, promoted_at=datetime(2024, 1, 1, 12, 0)))
     with pytest.raises(Exception, match="naive datetime"):
         await session.commit()
+
+
+async def test_persist_backtest_run(session: AsyncSession, xauusd: Instrument) -> None:
+    from datetime import UTC
+    from datetime import datetime as dt
+
+    from app.services.backtests import persist_run
+    from app.services.seed import XAUUSD as SPEC
+    from engine.backtest.runner import CostConfig, run_backtest
+    from engine.data.calendar import MarketCalendar
+    from engine.data.resample import resample_bars
+    from engine.data.sources.synthetic import generate_m1
+    from engine.strategy.templates import template
+
+    cal = MarketCalendar.xauusd()
+    m15 = resample_bars(
+        generate_m1(dt(2024, 1, 7, tzinfo=UTC), dt(2024, 3, 3, tzinfo=UTC), cal), Timeframe.M15, cal
+    )
+    genome = template("sweep_reversal")
+    run = run_backtest(
+        genome,
+        m15,
+        Timeframe.M15,
+        calendar=cal,
+        sessions=SPEC.model_dump(mode="json")["sessions"],
+        costs=CostConfig.from_instrument(xauusd),
+    )
+    strategy = Strategy.from_genome(
+        genome.canonical(), instrument=xauusd, timeframe=Timeframe.M15, origin=StrategyOrigin.SEED
+    )
+    session.add(strategy)
+    persist_run(session, strategy, run, segment=Segment.IN_SAMPLE)
+    await session.commit()
+
+    result = await session.scalar(select(BacktestResult))
+    assert result is not None and result.n_trades == run.metrics["n_trades"] > 10
+    assert result.sharpe == pytest.approx(run.metrics["sharpe"])
+    assert result.extra_metrics["exit_reasons"] == run.metrics["exit_reasons"]
+    assert result.cost_model["commission_per_lot_rt"] == 7.0 and result.engine_version == "4.0"
+    trades = (await session.scalars(select(Trade).order_by(Trade.entry_ts))).all()
+    assert len(trades) == result.n_trades
+    assert trades[0].context["weekday"] in range(5) and trades[0].entry_ts.tzinfo is not None
+    assert sum(t.pnl for t in trades) == pytest.approx(run.trades["pnl"].sum())

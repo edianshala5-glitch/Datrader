@@ -242,3 +242,63 @@ def test_indicator_catalog_and_overlays(tmp_path: Path) -> None:
         assert ov["zones"] and all(z["top"] > z["bottom"] for z in ov["zones"])
         empty = client.get("/api/v1/data/XAUUSD/overlays", params={"source": "csv"}).json()
         assert empty["markers"] == [] and empty["zones"] == []
+
+
+def test_backtest_api(tmp_path: Path) -> None:
+    url = f"sqlite+aiosqlite:///{tmp_path / 'api.db'}"
+    asyncio.run(_prepare(url, tmp_path))
+    settings = Settings(_env_file=None, database_url=url, data_dir=tmp_path)  # type: ignore[call-arg]
+    with TestClient(create_app(settings, event_bus=InMemoryEventBus())) as client:
+        templates = {t["key"]: t for t in client.get("/api/v1/strategy-templates").json()}
+        assert {"smc_choch_fvg", "sweep_reversal", "ema_pullback", "divergence_bbands"} <= set(
+            templates
+        )
+        genome = templates["ema_pullback"]["genome"]
+        body = {
+            "genome": genome,
+            "timeframe": "5m",
+            "source": "synthetic",
+            "start": "2024-03-04T00:00:00Z",
+            "end": "2024-03-09T00:00:00Z",
+            "max_trades": 3,
+        }
+        res = client.post("/api/v1/backtest", json=body)
+        assert res.status_code == 200, res.text
+        out = res.json()
+        assert out["explanation"].startswith("LONG when")
+        assert out["metrics"]["n_trades"] >= len(out["trades"])
+        assert len(out["trades"]) <= 3 and out["equity"]["time"] == sorted(out["equity"]["time"])
+        assert out["costs"]["commission_per_lot_rt"] == 7.0
+
+        bad = {
+            **body,
+            "genome": {
+                **genome,
+                "entry_long": {
+                    "type": "group",
+                    "conditions": [
+                        {
+                            "type": "compare",
+                            "left": {
+                                "kind": "feature",
+                                "feature": {"indicator": "rsi", "output": "value"},
+                            },
+                            "op": ">",
+                            "right": {"kind": "const", "value": 250},
+                        }
+                    ],
+                },
+            },
+        }
+        assert client.post("/api/v1/backtest", json=bad).status_code == 422
+        assert (
+            client.post(
+                "/api/v1/backtest", json={**body, "end": "2024-03-01T00:00:00Z"}
+            ).status_code
+            == 422
+        )
+        empty = client.post(
+            "/api/v1/backtest",
+            json={**body, "start": "2030-01-01T00:00:00Z", "end": "2030-02-01T00:00:00Z"},
+        )
+        assert empty.status_code == 404
