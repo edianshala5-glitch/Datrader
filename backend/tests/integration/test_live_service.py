@@ -440,6 +440,7 @@ def test_champions_and_live_api(tmp_path: Path) -> None:
                 break
             time.sleep(0.5)
         assert st["champions"] == 1 and st["bars"] > 0 and "error" not in st
+        assert st["history_source"] == "synthetic"  # the dashboard loads chart bars from it
         sigs = client.get("/api/v1/signals", params={"kind": "entry"}).json()
         assert sigs and sigs[0]["rationale_text"].startswith("LONG")
         assert client.get(f"/api/v1/signals/{sigs[0]['id']}").json()["id"] == sigs[0]["id"]

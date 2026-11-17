@@ -1,7 +1,7 @@
 # Run from the repo root. Backend commands execute inside backend/ via uv.
 BACKEND := cd backend &&
 
-.PHONY: install dev test test-all lint typecheck migrate seed revision up down
+.PHONY: install dev test test-all lint typecheck migrate seed revision up down web-install web web-build web-check
 
 install:            ## install backend deps (incl. dev tools)
 	$(BACKEND) uv sync
@@ -36,3 +36,15 @@ up:
 
 down:
 	docker compose down
+
+web-install:        ## install dashboard deps
+	cd frontend && npm ci
+
+web:                ## dashboard dev server on :3000 (expects the API on :8000)
+	cd frontend && npm run dev
+
+web-build:
+	cd frontend && npm run build
+
+web-check:          ## strict TypeScript check of the dashboard
+	cd frontend && npm run typecheck

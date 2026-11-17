@@ -82,12 +82,18 @@ Metadata: SQLite for zero setup, Postgres in docker-compose.
    simulator per bar (exact parity, tested end to end and at the DB level). OANDA practice feed
    (stream + backfill + reconnect), replay feed, M1→TF aggregator, idempotent signals with
    rationale, webhook/Telegram notifiers for active champions only.
-9. **Frontend foundation**: Next.js App Router, TypeScript, Tailwind (dark only), typed
-   client generated from OpenAPI.
-10. **Lab**: generation timeline, Pareto scatter, island grid, lineage tree.
-11. **Leaderboard**: deep filters, strategy page with equity curve, trades on chart,
-    weekday × hour heatmap, per-fold table.
-12. **Live Signals**: feed, chart overlays (entry/SL/TP), rationale panel.
+9. **Frontend foundation** ✅: Next.js 15 App Router, React 19, strict TypeScript, Tailwind 4
+   (dark only, tokens in `globals.css`). A hand-written typed client (`src/lib/api.ts`) mirrors
+   the pydantic schemas. Polling `useFetch` and an auto-reconnecting `useStream` WebSocket hook.
+   Standalone Docker image.
+10. **Lab** ✅: best and mean fitness per island over generations, a discovery scatter
+    (explored / evolved / refined), island cards, live activity feed, start / pause / resume.
+    The lineage tree is deferred: parents are already linked on each strategy page.
+11. **Leaderboard** ✅: URL-driven deep filters with sortable columns, OOS-only by default.
+    The strategy page has the equity curve, trades on chart, weekday × NY-hour heatmap,
+    per-fold table, validation gates, holdout, context rules and Promote.
+12. **Live Signals** ✅: champion roster, feed on `ws/signals`, chart overlays (entry / SL / TP),
+    and a rationale panel ("all of" / "any of" conditions plus context filters).
 13. **Hardening**: auth, observability, CI, deployment docs.
 
 ## Design decisions

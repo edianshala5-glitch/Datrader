@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -193,6 +194,19 @@ def test_meta_api(tmp_path: Path) -> None:
             "/api/v1/strategies", params={"symbol": "XAUUSD", "status": "validated"}
         ).json()
         assert meta_strats["total"] >= 1
+
+        # Strategy-detail page feeds: stored results and trades of the refined strategy.
+        refined_id = rules[0]["details"]["refined_strategy_id"]
+        bts = client.get(f"/api/v1/strategies/{refined_id}/backtests").json()
+        assert [b["segment"] for b in bts] == ["validation"]
+        assert bts[0]["context_rule_id"] == rules[0]["id"] and "meta_rule" in bts[0]["extra"]
+        trades = client.get(f"/api/v1/strategies/{refined_id}/trades").json()
+        assert len(trades) == bts[0]["n_trades"] > 0
+        assert {t["segment"] for t in trades} == {"validation"}
+        assert trades == sorted(trades, key=lambda t: t["entry_ts"])
+        assert all(t["side"] in ("long", "short") and t["exit_reason"] for t in trades)
+        assert len(client.get(f"/api/v1/strategies/{refined_id}/trades?limit=1").json()) == 1
+        assert client.get(f"/api/v1/strategies/{uuid.uuid4()}/trades").json() == []
 
         adhoc = client.post(
             "/api/v1/meta",

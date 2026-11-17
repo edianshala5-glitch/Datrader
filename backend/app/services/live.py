@@ -95,6 +95,7 @@ class LiveService:
             "signals": 0,
             "champions": 0,
             "bars": 0,
+            "history_source": history_source.value,
         }
         self._m1_history = pd.DataFrame()
 

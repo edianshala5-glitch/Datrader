@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import SessionDep
-from app.models import Instrument, Strategy
+from app.models import BacktestResult, Instrument, Strategy, Trade
 from app.models.enums import StrategyStatus, Timeframe
 from app.schemas.common import Page
 from app.schemas.strategy import StrategyDetail, StrategySort, StrategySummary
@@ -86,3 +87,64 @@ async def get_strategy(strategy_id: uuid.UUID, session: SessionDep) -> StrategyD
         description=strategy.description,
         parent_ids=[p.id for p in strategy.parents],
     )
+
+
+@router.get("/{strategy_id}/backtests")
+async def strategy_backtests(strategy_id: uuid.UUID, session: SessionDep) -> list[dict[str, Any]]:
+    """Every stored result: walk-forward folds, validation summary, holdout, meta-rule tests."""
+    rows = await session.scalars(
+        select(BacktestResult)
+        .where(BacktestResult.strategy_id == strategy_id)
+        .order_by(BacktestResult.segment, BacktestResult.fold_index)
+    )
+    return [
+        {
+            "id": str(r.id),
+            "segment": r.segment.value,
+            "fold_index": r.fold_index,
+            "context_rule_id": str(r.context_rule_id) if r.context_rule_id else None,
+            "period_start": r.period_start.isoformat(),
+            "period_end": r.period_end.isoformat(),
+            "n_trades": r.n_trades,
+            "total_return": r.total_return,
+            "sharpe": r.sharpe,
+            "sortino": r.sortino,
+            "max_drawdown": r.max_drawdown,
+            "profit_factor": r.profit_factor,
+            "win_rate": r.win_rate,
+            "expectancy_r": r.expectancy_r,
+            "extra": r.extra_metrics,
+        }
+        for r in rows
+    ]
+
+
+@router.get("/{strategy_id}/trades")
+async def strategy_trades(
+    strategy_id: uuid.UUID, session: SessionDep, limit: int = Query(2000, ge=1, le=20000)
+) -> list[dict[str, Any]]:
+    """Stored trades (out-of-sample folds, holdout, refined-rule tests) with entry context."""
+    rows = await session.execute(
+        select(Trade, BacktestResult.segment)
+        .join(BacktestResult, Trade.backtest_id == BacktestResult.id)
+        .where(Trade.strategy_id == strategy_id)
+        .order_by(Trade.entry_ts)
+        .limit(limit)
+    )
+    return [
+        {
+            "segment": seg.value,
+            "side": t.side.value,
+            "entry_ts": t.entry_ts.isoformat(),
+            "exit_ts": t.exit_ts.isoformat(),
+            "entry_price": t.entry_price,
+            "exit_price": t.exit_price,
+            "stop_price": t.stop_price,
+            "target_price": t.target_price,
+            "pnl_r": t.pnl_r,
+            "exit_reason": t.exit_reason.value,
+            "bars_held": t.bars_held,
+            "context": t.context,
+        }
+        for t, seg in rows.all()
+    ]

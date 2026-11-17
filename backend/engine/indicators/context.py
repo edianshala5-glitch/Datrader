@@ -66,7 +66,7 @@ def _time(inp: Inputs) -> Outputs:
     cal = inp.calendar
     ny = inp.ts.tz_convert(cal.tz)
     day = cal.trading_day(inp.ts)
-    weekday = np.asarray(day.dayofweek, dtype=np.int8)
+    weekday = np.asarray(day.day_of_week, dtype=np.int8)
     minute = np.asarray(ny.hour * 60 + ny.minute, dtype=np.int32)
     clock = cal.trading_clock(inp.ts)
     into_day = np.asarray(clock.hour * 60 + clock.minute, dtype=np.int32) - 60  # day opens 18:00

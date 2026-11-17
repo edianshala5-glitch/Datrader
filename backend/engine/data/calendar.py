@@ -80,7 +80,7 @@ class MarketCalendar:
     ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
         local = _as_index(ts).tz_convert(self.tz)
         mod = np.asarray(local.hour * 60 + local.minute, dtype=np.int64)
-        mow = np.asarray(local.dayofweek, dtype=np.int64) * 1440 + mod
+        mow = np.asarray(local.day_of_week, dtype=np.int64) * 1440 + mod
         return mow, mod
 
     # ------------------------------------------------------------------ public API

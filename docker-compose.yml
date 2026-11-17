@@ -39,7 +39,13 @@ services:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
 
-  # worker (Step 6) and frontend (Step 9) services are added in later steps.
+  web:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000  # the URL your *browser* uses to reach the API
+    ports: ["3000:3000"]
+    depends_on: [api]
 
 volumes:
   pgdata:

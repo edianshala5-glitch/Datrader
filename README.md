@@ -23,8 +23,8 @@ top 3 out-of-sample **Champions** drive a live signal feed.
 | 6 | Optimization swarm (NSGA-II, islands) | ✅ done |
 | 7 | Meta-Analyzer (context rules) | ✅ done |
 | 8 | Champions + live signaling | ✅ done |
-| 9–12 | Next.js dashboard: Lab, Leaderboard, Live Signals | next |
-| 13 | Hardening | |
+| 9–12 | Next.js dashboard: Lab, Leaderboard, Live Signals | ✅ done |
+| 13 | Hardening | next |
 
 See [docs/PLAN.md](docs/PLAN.md) for the architecture and the full plan.
 
@@ -216,10 +216,33 @@ uv run swarm live --feed replay --source dukascopy --replay-start 2024-06-02   #
   backfill on start, and reconnects with backoff.
 - **Replay** of stored bars.
 
+### Dashboard
+
+```bash
+cd frontend
+npm ci
+npm run dev        # http://localhost:3000, talks to the API on :8000
+```
+
+Set `NEXT_PUBLIC_API_URL` if the API runs elsewhere. From the repo root: `make web-install && make web`.
+The dashboard is dark-only, and every page works at phone width.
+
+| Page | What it shows |
+|---|---|
+| **Overview** | API, stream and live-engine health. Latest run, leaderboard top 5, active champions, last signals. |
+| **Lab** | Watch the swarm evolve. Best and mean fitness per island, discovery scatter (explored / evolved / refined strategies), island cards, live activity feed (`ws/lab`). Start, pause and resume runs. |
+| **Leaderboard** | Every strategy, with URL-shareable filters: timeframe, status, min trades / win rate / PF / Deflated Sharpe, max overfit risk / drawdown. Sortable columns. Out-of-sample-only by default. |
+| **Strategy** | Rules in plain English, OOS equity curve, weekday × NY-hour heatmap of trade results, trades on the candle chart, validation gates and folds, the holdout result, mined context rules (rejected ones with reasons), and Promote. |
+| **Live Signals** | The champion roster with backtest / holdout / live stats. Signal feed (`ws/signals`) with entry, stop and target on the chart. A rationale panel lists every condition and filter that fired. |
+| **Data** | Candles with BOS / CHoCH / sweep markers, the dataset catalogue and M1 quality reports. |
+
+Charts use TradingView Lightweight Charts (free, Apache-2.0) for candles plus small SVG
+charts, with a colour-blind-checked palette.
+
 ### Full stack (Postgres + Redis)
 
 ```bash
-docker compose up -d --build   # api on :8000, postgres on :5432, redis on :6379
+docker compose up -d --build   # web on :3000, api on :8000, postgres on :5432, redis on :6379
 ```
 
 ## Tests
@@ -228,6 +251,7 @@ docker compose up -d --build   # api on :8000, postgres on :5432, redis on :6379
 make test       # SQLite + in-memory event bus
 make test-all   # also PostgreSQL + Redis (needs `docker compose up -d postgres redis`)
 make lint typecheck
+make web-check   # strict TypeScript check of the dashboard
 ```
 
 `test-all` uses a dedicated `swarm_test` database. The suite refuses to run against any
@@ -259,10 +283,14 @@ backend/
     live/        feeds (OANDA, replay), M1→TF aggregator, parity signal engine, rationale, notifiers
   alembic/       migrations (tested for drift against the models on SQLite and Postgres)
   tests/
+frontend/
+  src/app/       pages: overview, lab, leaderboard, strategies/[id], signals, data
+  src/components/  shell, UI kit, charts (candles, equity, line, scatter, heatmap)
+  src/lib/       typed API client, fetch/WebSocket hooks, formatters
 docker-compose.yml
 ```
 
-## API (so far)
+## API
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -272,6 +300,7 @@ docker-compose.yml
 | POST | `/api/v1/runs`, `/runs/{id}/stop`, `/runs/{id}/resume` | start / pause / resume a swarm run |
 | GET | `/api/v1/strategies` | leaderboard with filters: timeframe, status, min trades/win rate/PF/DSR, max overfit risk/drawdown, sort |
 | GET | `/api/v1/strategies/{id}` | genome, lineage, metrics |
+| GET | `/api/v1/strategies/{id}/backtests`, `/strategies/{id}/trades` | stored results (folds, holdout, rule tests) and trades with entry context |
 | GET | `/api/v1/data/{symbol}/datasets` | data catalogue + quality reports |
 | GET | `/api/v1/data/{symbol}/bars` | chart bars (bid/ask/mid, any timeframe, column arrays) |
 | GET | `/api/v1/data/{symbol}/overlays` | SMC markers + FVG zones for charts |
