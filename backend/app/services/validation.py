@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,8 +25,31 @@ def _f(v: Any) -> float | None:
     return None if v is None or (isinstance(v, float) and not math.isfinite(v)) else float(v)
 
 
+async def prior_oos_validations(
+    session: AsyncSession, instrument_id: Any, timeframe: Any, exclude_run: Any = None
+) -> int:
+    """How many strategies have already been judged on this instrument/timeframe's OOS
+    windows. Every earlier look at the same out-of-sample data is a trial that the next
+    Deflated Sharpe must pay for (OOS reuse)."""
+    stmt = (
+        select(func.count())
+        .select_from(Strategy)
+        .where(
+            Strategy.instrument_id == instrument_id,
+            Strategy.timeframe == timeframe,
+            Strategy.overfit_risk.is_not(None),
+        )
+    )
+    if exclude_run is not None:
+        stmt = stmt.where((Strategy.run_id != exclude_run) | Strategy.run_id.is_(None))
+    return int(await session.scalar(stmt) or 0)
+
+
 async def apply_validation(
-    session: AsyncSession, strategy: Strategy, report: ValidationReport
+    session: AsyncSession,
+    strategy: Strategy,
+    report: ValidationReport,
+    context: dict[str, Any] | None = None,
 ) -> BacktestResult:
     """Store per-fold IS/OOS results plus the stitched OOS summary, update the strategy's
     leaderboard columns and set its status to VALIDATED or REJECTED."""
@@ -65,7 +88,7 @@ async def apply_validation(
         win_rate=_f(m.get("win_rate")),
         expectancy_r=_f(m.get("expectancy_r")),
         avg_bars_held=_f(m.get("avg_bars_held")),
-        extra_metrics={"validation_report": report.to_dict()},
+        extra_metrics={"validation_report": {**report.to_dict(), **(context or {})}},
         cost_model=report.folds[0].oos_run.costs.to_dict(),
         engine_version=report.folds[0].oos_run.engine_version,
     )

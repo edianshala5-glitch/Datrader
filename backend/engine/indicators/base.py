@@ -105,6 +105,10 @@ class Output:
     hi: float | None = None
     values: tuple[int, ...] | None = None  # for STATE outputs
     description: str = ""
+    # Params this output depends on (None = all). Unused params are stripped from feature
+    # specs, so logically identical strategies hash identically and the GA never mutates
+    # knobs that cannot change the result.
+    uses: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -277,6 +281,12 @@ class FeatureRef:
     @property
     def kind(self) -> OutputKind:
         return get_spec(self.indicator).outputs[self.output].kind
+
+
+def relevant_params(indicator: str, output: str) -> tuple[str, ...]:
+    spec = get_spec(indicator)
+    uses = spec.outputs[output].uses
+    return tuple(spec.params) if uses is None else uses
 
 
 def spec_hash(items: Any) -> str:

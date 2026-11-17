@@ -17,6 +17,7 @@ import numpy as np
 from pydantic import BaseModel, ValidationError
 
 from engine.indicators import get_spec
+from engine.indicators.base import relevant_params
 from engine.strategy import genome as g
 
 Path = tuple[str | int, ...]
@@ -59,9 +60,10 @@ def _field_bounds(model: type[BaseModel], name: str) -> tuple[float, float] | No
 
 def _feature_knobs(feat: dict[str, Any], path: Path) -> list[Knob]:
     spec = get_spec(feat["indicator"])
+    used = set(relevant_params(feat["indicator"], feat["output"]))
     out = []
     for name, p in spec.params.items():
-        if p.kind not in ("int", "float") or p.low is None or p.high is None:
+        if name not in used or p.kind not in ("int", "float") or p.low is None or p.high is None:
             continue
         value = feat.get("params", {}).get(name, p.default)
         step = p.step or (1.0 if p.kind == "int" else _grid(p.low, p.high))

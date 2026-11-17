@@ -136,14 +136,28 @@ def _sessions(inp: Inputs) -> Outputs:
         "adx_min": Param(20.0, 10.0, 40.0, 1.0),
     },
     outputs={
-        "vol_rank": Output(OutputKind.RATIO, 0, 1, description="ATR percentile over `window` bars"),
+        "vol_rank": Output(
+            OutputKind.RATIO,
+            0,
+            1,
+            description="ATR percentile over `window` bars",
+            uses=("window",),
+        ),
         "vol_regime": Output(
-            OutputKind.STATE, values=(0, 1, 2), description="0 low, 1 normal, 2 high"
+            OutputKind.STATE,
+            values=(0, 1, 2),
+            description="0 low, 1 normal, 2 high",
+            uses=("window",),
         ),
         "trend_regime": Output(
-            OutputKind.STATE, values=(-1, 0, 1), description="EMA alignment + ADX"
+            OutputKind.STATE,
+            values=(-1, 0, 1),
+            description="EMA alignment + ADX",
+            uses=("trend_fast", "trend_slow", "adx_min"),
         ),
-        "efficiency": Output(OutputKind.RATIO, 0, 1, description="Kaufman efficiency ratio (20)"),
+        "efficiency": Output(
+            OutputKind.RATIO, 0, 1, description="Kaufman efficiency ratio (20)", uses=()
+        ),
     },
     description="Volatility and trend regime (trailing percentile ranks, no lookahead).",
 )

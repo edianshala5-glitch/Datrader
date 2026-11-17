@@ -67,9 +67,11 @@ Metadata: SQLite for zero setup, Postgres in docker-compose.
    per strategy, enforced by a partial unique index), PSR/DSR, Holm/BH, bootstrap CIs,
    PBO via CSCV, parameter-perturbation robustness, cost stress, Monte Carlo, an overfit-risk
    score and gates. Proven with negative, positive and lucky-winner controls (docs/VALIDATION.md).
-6. **Swarm**: DEAP NSGA-II over (OOS Sortino, max DD, trade count, fold stability), island
-   model with migration, process-pool workers (Ray optional), resumable checkpoints,
-   generation events → Lab.
+6. **Swarm** ✅: own NSGA-II (DEAP's global creator state and list genomes fit poorly with
+   validated tree genomes), island model with ring migration, typed random conditions,
+   mirroring, mutation/crossover/perturbation, a declared param-dependency registry, parallel
+   spawn workers, deterministic checkpoints, per-generation persistence + Lab events, and
+   hall-of-fame validation with the OOS-reuse trial counter (docs/VALIDATION.md).
 7. **Meta-Analyzer**: per-trade context features → gradient-boosted trees for importance,
    shallow decision trees → readable rules → OOS + multiple-testing validation.
 8. **Champions & live signals**: promotion criteria, incubation, demotion on drift.

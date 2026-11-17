@@ -31,6 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.enums import Timeframe
 from engine.indicators import FeatureRef, OutputKind, get_spec
+from engine.indicators.base import relevant_params
 
 MAX_DEPTH = 3
 MAX_CONDITIONS = 12
@@ -53,6 +54,22 @@ class FeatureSpec(_Strict):
     output: str
     params: dict[str, Any] = Field(default_factory=dict)
     timeframe: Timeframe | None = None  # higher timeframe; None = the strategy's own
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_unused(cls, data: Any) -> Any:
+        if (
+            isinstance(data, dict)
+            and data.get("params")
+            and "indicator" in data
+            and "output" in data
+        ):
+            try:
+                keep = set(relevant_params(data["indicator"], data["output"]))
+            except KeyError:
+                return data  # unknown indicator/output: let the after-validator report it
+            data = {**data, "params": {k: v for k, v in data["params"].items() if k in keep}}
+        return data
 
     @model_validator(mode="after")
     def _check(self) -> FeatureSpec:

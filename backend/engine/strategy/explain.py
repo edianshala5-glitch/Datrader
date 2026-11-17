@@ -79,7 +79,8 @@ def feature_label(f: FeatureSpec) -> str:
             resolved = spec.resolve(f.params)
             args = ",".join(str(v) for v in resolved.values())
             name = f"{f.indicator.upper()}({args})" if args else f.indicator.upper()
-            base = name if len(spec.outputs) == 1 else f"{name} {f.output.replace('_', ' ')}"
+            single = len(spec.outputs) == 1 or f.output == f.indicator
+            base = name if single else f"{name} {f.output.replace('_', ' ')}"
     non_default = {
         k: v for k, v in f.params.items() if get_spec(f.indicator).params[k].default != v
     }

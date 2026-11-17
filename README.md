@@ -20,8 +20,8 @@ top 3 out-of-sample **Champions** drive a live signal feed.
 | 3 | Indicator engine (standard + SMC, lookahead-safe) | ✅ done |
 | 4 | Strategy DSL + numba backtester | ✅ done |
 | 5 | Validation harness (walk-forward, Deflated Sharpe, PBO) | ✅ done |
-| 6 | Optimization swarm (DEAP NSGA-II, islands) | next |
-| 7 | Meta-Analyzer (context rules) | |
+| 6 | Optimization swarm (NSGA-II, islands) | ✅ done |
+| 7 | Meta-Analyzer (context rules) | next |
 | 8 | Champions + live signaling | |
 | 9–12 | Next.js dashboard: Lab, Leaderboard, Live Signals | |
 | 13 | Hardening | |
@@ -138,6 +138,27 @@ The harness is tested against controls:
 
 See [docs/VALIDATION.md](docs/VALIDATION.md).
 
+### The swarm
+
+```bash
+uv run swarm evolve --start 2016-01-01 --end 2025-01-01 --timeframe 15m \
+    --islands 4 --population 40 --generations 25 --htf 1h 4h --workers 7
+# Ctrl-C pauses after the current generation:
+uv run swarm evolve --resume <run-id>
+```
+
+- **Island-model NSGA-II** over strategy genomes. Objectives: R t-statistic (minus a
+  complexity penalty), drawdown, and consistency across sub-periods.
+- **Variation:** random typed conditions, mutation, crossover, numeric perturbation.
+  Long rules mirror into shorts (bull ↔ bear, RSI < 30 ↔ RSI > 70). Params an output ignores
+  are stripped, so logically identical strategies hash identically.
+- **Data:** the GA sees only its training window. The hall of fame is then validated on
+  walk-forward windows it never saw, and the holdout stays locked.
+- **Execution:** parallel workers, deterministic (serial = parallel, resume = uninterrupted),
+  checkpointed after every generation. Every generation streams to `ws/lab` and is stored
+  (generations, strategies with lineage).
+- `POST /api/v1/runs` starts a background run; `/stop` and `/resume` control it.
+
 ### Full stack (Postgres + Redis)
 
 ```bash
@@ -167,7 +188,7 @@ backend/
     schemas/     Pydantic v2 API models + validators for instrument JSON config
     api/v1/      health, instruments, runs, strategies (leaderboard), WebSocket stream
     services/    seed data (XAUUSD definition), ingestion orchestration
-    cli.py       `swarm migrate | seed | serve | ingest | data … | backtest | validate`
+    cli.py       `swarm migrate | seed | serve | ingest | data … | backtest | validate | evolve`
   engine/        quant core (no web deps)
     data/        calendar (NY sessions, 17:00 roll), US holidays, Parquet+DuckDB store,
                  resampling, quality reports, sources: dukascopy | csv (MT5) | synthetic
@@ -176,6 +197,7 @@ backend/
     strategy/    genome DSL (pydantic), compiler → signal arrays, explain, templates
     backtest/    numba simulator, metrics (daily Sharpe/Sortino, PF, R stats), runner
     validation/  splits (walk-forward + holdout), PSR/DSR, PBO (CSCV), Monte Carlo, validator
+    evolution/   NSGA-II, genetic operators (+ mirroring), fitness, parallel evaluator, islands
   alembic/       migrations (tested for drift against the models on SQLite and Postgres)
   tests/
 docker-compose.yml
@@ -188,6 +210,7 @@ docker-compose.yml
 | GET | `/api/v1/health` | DB + event-bus health |
 | GET | `/api/v1/instruments[/{symbol}]` | instrument specs, sessions, cost model |
 | GET | `/api/v1/runs`, `/runs/{id}`, `/runs/{id}/generations` | evolution runs (Lab) |
+| POST | `/api/v1/runs`, `/runs/{id}/stop`, `/runs/{id}/resume` | start / pause / resume a swarm run |
 | GET | `/api/v1/strategies` | leaderboard with filters: timeframe, status, min trades/win rate/PF/DSR, max overfit risk/drawdown, sort |
 | GET | `/api/v1/strategies/{id}` | genome, lineage, metrics |
 | GET | `/api/v1/data/{symbol}/datasets` | data catalogue + quality reports |

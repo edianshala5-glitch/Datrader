@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -322,6 +323,106 @@ def cmd_validate(args: argparse.Namespace) -> None:
         )
 
 
+async def _evolve(args: argparse.Namespace) -> None:
+    import signal
+    import threading
+    import uuid
+
+    from app.core.events import create_event_bus
+    from app.db.session import create_engine, create_sessionmaker
+    from app.models.enums import DataSource, Timeframe
+    from app.services.evolution import create_run, execute_run
+    from engine.data.store import ParquetStore
+    from engine.evolution.engine import EvolutionConfig
+    from engine.evolution.fitness import FitnessConfig
+
+    settings = get_settings()
+    engine = create_engine(settings.database_url)
+    factory = create_sessionmaker(engine)
+    bus = create_event_bus(
+        settings.redis_url, settings.event_channel_prefix
+    )  # Redis → visible in the UI
+    stop = threading.Event()
+    asyncio.get_running_loop().add_signal_handler(signal.SIGINT, stop.set)
+    try:
+        if args.resume:
+            run_id = uuid.UUID(args.resume)
+        else:
+            cfg = EvolutionConfig(
+                islands=args.islands,
+                population=args.population,
+                generations=args.generations,
+                htf=tuple(args.htf or ()),
+                seed=args.seed,
+                fitness=FitnessConfig(min_trades=args.min_trades),
+            )
+            async with factory() as session:
+                run = await create_run(
+                    session,
+                    name=args.name,
+                    symbol=args.symbol,
+                    timeframe=Timeframe(args.timeframe),
+                    start=_parse_date(args.start),
+                    end=_parse_date(args.end),
+                    config=cfg,
+                    source=DataSource(args.source),
+                    validate_top=args.validate_top,
+                )
+                await session.commit()
+                run_id = run.id
+        print(
+            f"run {run_id} (Ctrl-C pauses after the current generation; "
+            f"resume with --resume {run_id})"
+        )
+
+        async def show() -> None:
+            from app.core.events import Channel
+
+            async with bus.subscribe(Channel.LAB) as events:
+                async for e in events:
+                    p = e.payload
+                    if e.type == "generation":
+                        b = p.get("best") or {}
+                        m = b.get("metrics", {})
+                        print(
+                            f"gen {p['generation']:>3}  evals {p['evaluations']:>6}  "
+                            f"{p['duration_ms']:>6}ms  "
+                            f"best fitness {b.get('fitness', float('nan')):+.2f}  "
+                            f"t={m.get('t_stat', 0):+.2f}  "
+                            f"trades={m.get('n_trades')}"
+                            + ("  [migration]" if p["migrated"] else "")
+                        )
+                    elif e.type == "validated":
+                        print(
+                            f"  {p['name']}: {'VALIDATED' if p['passed'] else 'rejected'}  "
+                            f"risk {p['overfit_risk']:.2f}  DSR {p['dsr']:.3f}"
+                        )
+                    elif e.type in ("validating", "run_completed", "run_paused", "run_failed"):
+                        print(f"[{e.type}] {p}")
+
+        watcher = asyncio.create_task(show())
+        await asyncio.sleep(0)
+        status = await execute_run(
+            factory,
+            ParquetStore(settings.data_dir / "parquet"),
+            bus,
+            run_id,
+            checkpoint_dir=settings.data_dir / "runs",
+            workers=args.workers,
+            stop=stop,
+        )
+        await asyncio.sleep(0.1)
+        watcher.cancel()
+        print(f"run {run_id}: {status.value}")
+    finally:
+        await bus.close()
+        await engine.dispose()
+
+
+def cmd_evolve(args: argparse.Namespace) -> None:
+    asyncio.run(_evolve(args))
+
+
 def cmd_serve(args: argparse.Namespace) -> None:
     import uvicorn
 
@@ -413,7 +514,27 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--trials", type=int, default=1, help="strategies tried before this one (DSR)")
     p.set_defaults(func=cmd_validate)
 
+    p = sub.add_parser("evolve", help="run the strategy swarm (GA) and validate the winners")
+    p.add_argument("--resume", help="resume a paused run by id")
+    p.add_argument("--name", default="xau-swarm")
+    p.add_argument("--symbol", default=settings.default_symbol)
+    p.add_argument("--timeframe", default="15m")
+    p.add_argument("--source", default="dukascopy")
+    p.add_argument("--start")
+    p.add_argument("--end")
+    p.add_argument("--islands", type=int, default=4)
+    p.add_argument("--population", type=int, default=40)
+    p.add_argument("--generations", type=int, default=25)
+    p.add_argument("--htf", nargs="*", help="higher timeframes the GA may use, e.g. 1h 4h")
+    p.add_argument("--min-trades", type=int, default=30)
+    p.add_argument("--validate-top", type=int, default=10)
+    p.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
+    p.add_argument("--seed", type=int, default=0)
+    p.set_defaults(func=cmd_evolve)
+
     args = parser.parse_args(argv)
+    if args.command == "evolve" and not args.resume and not (args.start and args.end):
+        parser.error("evolve needs --start and --end (or --resume)")
     args.func(args)
 
 

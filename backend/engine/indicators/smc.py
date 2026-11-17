@@ -34,6 +34,10 @@ EVENT = Output(OutputKind.EVENT)
 FLAG = Output(OutputKind.FLAG)
 PRICE = Output(OutputKind.PRICE)
 SWING = Param(5, 2, 30, 1)  # bars each side of a pivot
+# eq_tol only affects equal highs/lows; break_on doesn't affect them.
+STRUCT_USES = ("length", "break_on")
+EQ_USES = ("length", "eq_tol")
+STRUCT_EVENT = Output(OutputKind.EVENT, uses=STRUCT_USES)
 
 
 def swings(inp: Inputs, length: int) -> tuple[np.ndarray, ...]:
@@ -98,19 +102,31 @@ def _swings(inp: Inputs, length: int) -> Outputs:
         "eq_tol": Param(0.1, 0.01, 1.0, 0.01),
     },
     outputs={
-        "trend": Output(OutputKind.STATE, values=(-1, 0, 1), description="-1 bear, 1 bull"),
-        "bos_bull": EVENT,
-        "bos_bear": EVENT,
-        "choch_bull": EVENT,
-        "choch_bear": EVENT,
-        "sweep_high": Output(
-            OutputKind.EVENT, description="wick above swing high, close back below"
+        "trend": Output(
+            OutputKind.STATE, values=(-1, 0, 1), description="-1 bear, 1 bull", uses=STRUCT_USES
         ),
-        "sweep_low": Output(OutputKind.EVENT, description="wick below swing low, close back above"),
-        "eqh": Output(OutputKind.EVENT, description="equal highs (within eq_tol x ATR)"),
-        "eql": Output(OutputKind.EVENT, description="equal lows"),
-        "level_high": Output(OutputKind.PRICE, description="unbroken swing high being watched"),
-        "level_low": Output(OutputKind.PRICE, description="unbroken swing low being watched"),
+        "bos_bull": STRUCT_EVENT,
+        "bos_bear": STRUCT_EVENT,
+        "choch_bull": STRUCT_EVENT,
+        "choch_bear": STRUCT_EVENT,
+        "sweep_high": Output(
+            OutputKind.EVENT,
+            description="wick above swing high, close back below",
+            uses=STRUCT_USES,
+        ),
+        "sweep_low": Output(
+            OutputKind.EVENT, description="wick below swing low, close back above", uses=STRUCT_USES
+        ),
+        "eqh": Output(
+            OutputKind.EVENT, description="equal highs (within eq_tol x ATR)", uses=EQ_USES
+        ),
+        "eql": Output(OutputKind.EVENT, description="equal lows", uses=EQ_USES),
+        "level_high": Output(
+            OutputKind.PRICE, description="unbroken swing high being watched", uses=STRUCT_USES
+        ),
+        "level_low": Output(
+            OutputKind.PRICE, description="unbroken swing low being watched", uses=STRUCT_USES
+        ),
     },
     description="Market structure: BOS (continuation), CHoCH (reversal), sweeps, EQH/EQL.",
 )

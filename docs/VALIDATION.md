@@ -46,6 +46,41 @@ Experiment (`tests/unit/test_validation.py::test_lucky_winner_needs_trial_correc
 > Validated as if it were the only strategy tried: **overfit risk 0.11**, DSR 0.90.
 > Validated honestly (n_trials = 50): **DSR 0.17, rejected**. PBO of the selection: 0.50.
 
+## Which trials to count (swarm runs)
+
+Selection bias exists only when a strategy is chosen and measured **on the same data**.
+The pipeline keeps the layers apart:
+
+```
+GA training window  →  walk-forward OOS windows  →  locked holdout
+(the swarm selects)    (validation measures)        (promotion, once)
+```
+
+The swarm never sees the OOS windows, so it is not charged for every genome it tried
+(1,500+ in a small run). That would reject real edges it found honestly: a near-exact
+rediscovery of a planted edge failed at DSR 0.56 that way. Instead the Deflated Sharpe uses:
+
+`n_trials = candidates validated now + every strategy previously judged on the same
+instrument/timeframe OOS data`
+
+The second term is the OOS-reuse counter. Repeatedly validating on the same windows
+gradually raises the bar, as it should. The raw search count is still recorded on every
+report (`search_evaluations`) for transparency. When selection *does* use the measured data,
+as in the lucky-winner experiment below, every trial counts.
+
+## Swarm end-to-end controls
+
+4 islands x 30 strategies x 12 generations (~1,550 evaluations), top 10 validated:
+
+| Data | Runs | Strategies validated |
+|---|---|---|
+| Edge-free | 4 | **0 / 40** |
+| Planted 08:00-11:00 NY drift | 4 | 3 / 40 (all from one run, all exploiting the planted window) |
+
+At this deliberately small budget, discovery of a narrow time-window edge is hit-or-miss.
+Certification never certified noise. Finding *when* a strategy works is the Meta-Analyzer's
+job (Step 7). Production runs use far larger budgets.
+
 ## Calibration: planted-edge experiments
 
 The synthetic generator can plant a known edge (an upward drift 08:00-11:00 NY). The rule
