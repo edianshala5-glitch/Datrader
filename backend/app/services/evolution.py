@@ -27,12 +27,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.events import Channel, Event, EventBus
 from app.models import EvolutionRun, Generation, Instrument, Job, Strategy, strategy_lineage
 from app.models.enums import DataSource, JobKind, JobStatus, RunStatus, Timeframe
+from app.services.meta import persist_meta, record_meta_job
 from app.services.validation import apply_validation, prior_oos_validations
 from engine.backtest.runner import CostConfig, run_backtest
 from engine.data.calendar import MarketCalendar
 from engine.data.store import ParquetStore
 from engine.evolution.engine import EvolutionConfig, EvolutionEngine, GenerationReport, Individual
 from engine.evolution.evaluator import EvalContext, Evaluator
+from engine.meta.analyzer import analyze
 from engine.strategy.compiler import FeatureProvider
 from engine.strategy.explain import explain
 from engine.validation.pbo import pbo_cscv
@@ -57,6 +59,7 @@ async def create_run(
     holdout_fraction: float = 0.2,
     n_folds: int = 5,
     validate_top: int = 10,
+    meta_top: int = 5,
 ) -> EvolutionRun:
     instrument = await session.scalar(select(Instrument).where(Instrument.symbol == symbol.upper()))
     if instrument is None:
@@ -69,7 +72,12 @@ async def create_run(
         timeframe=timeframe,
         status=RunStatus.PENDING,
         algorithm="nsga2-islands",
-        config={**config.to_dict(), "source": source.value, "validate_top": validate_top},
+        config={
+            **config.to_dict(),
+            "source": source.value,
+            "validate_top": validate_top,
+            "meta_top": meta_top,
+        },
         data_splits={**splits.to_dict(), "ga_window_end": splits.folds[0].train_end.isoformat()},
         seed=config.seed,
     )
@@ -98,6 +106,7 @@ class RunContext:
         self.cfg_raw = dict(run.config)
         self.source = DataSource(self.cfg_raw.pop("source", DataSource.DUKASCOPY.value))
         self.validate_top = int(self.cfg_raw.pop("validate_top", 10))
+        self.meta_top = int(self.cfg_raw.pop("meta_top", 5))
         self.config = EvolutionConfig.from_dict(self.cfg_raw)
         self.splits = DataSplits.from_dict(run.data_splits)
         self.ga_end = pd.Timestamp(run.data_splits["ga_window_end"])
@@ -344,6 +353,7 @@ async def execute_run(
             return RunStatus.PAUSED
 
         await _validate_hall_of_fame(sessionmaker, bus, run_id, ctx, engine, ids, validation, loop)
+        await _meta_analyze_hall_of_fame(sessionmaker, bus, run_id, ctx, engine, ids, loop)
 
         async with sessionmaker() as session:
             run = await session.get(EvolutionRun, run_id)
@@ -505,6 +515,57 @@ async def _validate_hall_of_fame(
                     "overfit_risk": report.overfit_risk,
                     "dsr": report.dsr,
                     "reasons": report.reasons,
+                },
+            )
+        )
+
+
+async def _meta_analyze_hall_of_fame(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    bus: EventBus,
+    run_id: Any,
+    ctx: RunContext,
+    engine: EvolutionEngine,
+    ids: dict[str, Any],
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    """Search for the contexts in which the run's best strategies work. Strategies that failed
+    overall validation are included: a weak strategy can be strong in one context."""
+    top = [i for i in engine.best(ctx.meta_top) if i.key in ids]
+    tested_so_far = 0  # rule candidates already tested on this OOS window in this run
+    for ind in top:
+        report = await loop.run_in_executor(
+            None,
+            lambda g=ind.genome, t=tested_so_far: analyze(  # type: ignore[misc]
+                g,
+                ctx.bars,
+                ctx.timeframe,
+                ctx.splits,
+                calendar=ctx.calendar,
+                sessions=ctx.sessions,
+                costs=ctx.costs,
+                htf_bars=ctx.htf,
+                extra_trials=t,
+            ),
+        )
+        tested_so_far += len(report.rules)
+        async with sessionmaker() as session:
+            base = await session.get(Strategy, ids[ind.key])
+            assert base is not None
+            await persist_meta(session, base, report)
+            await record_meta_job(session, base, report)
+            await session.commit()
+            name = base.name
+        await bus.publish(
+            Event(
+                channel=Channel.LAB,
+                type="meta_analyzed",
+                payload={
+                    "run_id": str(run_id),
+                    "strategy": name,
+                    "tested": len(report.rules),
+                    "selected": [r.rule.describe() for r in report.selected],
+                    "skipped": report.skipped_reason,
                 },
             )
         )

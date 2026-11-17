@@ -83,6 +83,7 @@ class StrategyOrigin(StrEnum):
     MUTATION = "mutation"
     MIGRANT = "migrant"  # arrived from another island
     MANUAL = "manual"
+    META = "meta"  # base strategy + context rule from the Meta-Analyzer
     RL = "rl"
 
 

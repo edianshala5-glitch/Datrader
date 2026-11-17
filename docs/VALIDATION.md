@@ -81,6 +81,28 @@ At this deliberately small budget, discovery of a narrow time-window edge is hit
 Certification never certified noise. Finding *when* a strategy works is the Meta-Analyzer's
 job (Step 7). Production runs use far larger budgets.
 
+## Meta-Analyzer controls
+
+The base strategy trades all day. On synthetic data an edge was planted only on
+**Tuesdays 09:00-11:00 NY**:
+
+| Data | Seeds | Result |
+|---|---|---|
+| Strong planted edge | 2 / 2 | found *"trading day Tue AND NY time 08:00-10:00 …"*, OOS +0.43 to +0.59R per trade, refined DSR 1.00 |
+| Medium planted edge | 2 / 2 | Tuesday/NY-morning rules found (one strong, one weak) |
+| Edge-free | 3 / 3 | **0 of 60** candidates validated |
+
+(The window is right, not off by one: a decision at the close of an 08:xx bar enters at
+the next open, inside the planted window.)
+
+Two lessons from building it:
+- **Rank by kept-trade profitability, not lift.** Ranking by lift significance favoured
+  rules keeping 1,500 trades at +0.009R. Rules must make money significantly, not merely
+  lose less.
+- **Data mining is real.** On edge-free data mined rules showed +0.5R in-sample and
+  -0.1R out of sample. Only the out-of-sample test, with a multiple-testing correction,
+  separates them.
+
 ## Calibration: planted-edge experiments
 
 The synthetic generator can plant a known edge (an upward drift 08:00-11:00 NY). The rule

@@ -72,8 +72,11 @@ Metadata: SQLite for zero setup, Postgres in docker-compose.
    mirroring, mutation/crossover/perturbation, a declared param-dependency registry, parallel
    spawn workers, deterministic checkpoints, per-generation persistence + Lab events, and
    hall-of-fame validation with the OOS-reuse trial counter (docs/VALIDATION.md).
-7. **Meta-Analyzer**: per-trade context features → gradient-boosted trees for importance,
-   shallow decision trees → readable rules → OOS + multiple-testing validation.
+7. **Meta-Analyzer** ✅: direction-aligned context features that each map to an executable genome
+   condition. Mining: GBM permutation importance, shallow trees, feature-diverse beam search
+   ranked by the significance of kept-trade expectancy. Testing on a later window: Holm
+   correction, minimum trades, refined-strategy re-backtest, DSR, distinct-rule selection.
+   Rules and refined strategies are persisted with lineage, and run automatically after swarm runs.
 8. **Champions & live signals**: promotion criteria, incubation, demotion on drift.
    Idempotent signal emission with structured rationale.
 9. **Frontend foundation**: Next.js App Router, TypeScript, Tailwind (dark only), typed

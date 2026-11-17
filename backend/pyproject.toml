@@ -19,6 +19,7 @@ dependencies = [
     "duckdb>=2.0.0",
     "httpx>=0.28.1",
     "numba>=0.68.1",
+    "scikit-learn>=1.9.1",
 ]
 
 [project.scripts]
@@ -66,5 +67,5 @@ plugins = ["pydantic.mypy"]
 exclude = ["alembic/versions/"]
 
 [[tool.mypy.overrides]]
-module = ["pyarrow", "pyarrow.*"]
+module = ["pyarrow", "pyarrow.*", "sklearn", "sklearn.*"]
 ignore_missing_imports = true

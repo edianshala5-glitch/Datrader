@@ -102,7 +102,7 @@ async def test_run_end_to_end(engine: AsyncEngine, lake: ParquetStore, tmp_path:
 
     types = [e.type for e in events]
     assert types[0] == "run_started" and types[-1] == "run_completed"
-    assert types.count("generation") == 4 and "validating" in types
+    assert types.count("generation") == 4 and "validating" in types and "meta_analyzed" in types
     gen = next(e for e in events if e.type == "generation")
     assert {"islands", "best", "evaluations"} <= set(gen.payload)
 
@@ -134,6 +134,15 @@ async def test_run_end_to_end(engine: AsyncEngine, lake: ParquetStore, tmp_path:
         assert rep["search_evaluations"] == r.evaluations
         assert rep["n_trials"] == rep["candidates"] + rep["prior_oos_validations"]
     assert (tmp_path / "runs" / f"{run.id}.json").exists()
+    async with create_sessionmaker(engine)() as s:
+        from app.models import ContextRule, Job
+        from app.models.enums import JobKind
+
+        meta_jobs = await s.scalar(
+            select(func.count()).select_from(Job).where(Job.kind == JobKind.META_ANALYSIS)
+        )
+        assert meta_jobs and meta_jobs >= 1
+        assert await s.scalar(select(func.count()).select_from(ContextRule)) is not None
 
 
 async def test_pause_and_resume(engine: AsyncEngine, lake: ParquetStore, tmp_path: Path) -> None:

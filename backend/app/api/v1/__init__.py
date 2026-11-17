@@ -6,6 +6,7 @@ from app.api.v1 import (
     health,
     indicators,
     instruments,
+    meta,
     runs,
     strategies,
     validation,
@@ -21,4 +22,5 @@ api_router.include_router(data.router)
 api_router.include_router(indicators.router)
 api_router.include_router(backtest.router)
 api_router.include_router(validation.router)
+api_router.include_router(meta.router)
 api_router.include_router(ws.router)

@@ -39,6 +39,7 @@ class StartRunRequest(BaseModel):
     holdout_fraction: float = Field(0.2, ge=0.05, lt=0.9)
     n_folds: int = Field(5, ge=2, le=20)
     validate_top: int = Field(10, ge=0, le=200)
+    meta_top: int = Field(5, ge=0, le=100)
     workers: int = Field(1, ge=1, le=64)
     min_trades: int = Field(30, ge=5, le=10_000)
 

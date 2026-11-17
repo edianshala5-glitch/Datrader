@@ -423,6 +423,84 @@ def cmd_evolve(args: argparse.Namespace) -> None:
     asyncio.run(_evolve(args))
 
 
+def cmd_meta(args: argparse.Namespace) -> None:
+    import pandas as pd
+
+    from app.models.enums import DataSource, Timeframe
+    from app.services.seed import XAUUSD
+    from engine.backtest.runner import CostConfig
+    from engine.data.calendar import MarketCalendar
+    from engine.data.store import ParquetStore
+    from engine.meta.analyzer import analyze
+    from engine.strategy.explain import explain
+    from engine.strategy.genome import Genome
+    from engine.strategy.templates import template
+    from engine.validation.splits import make_splits
+
+    genome = (
+        Genome.model_validate_json(Path(args.genome).read_text())
+        if args.genome
+        else template(args.template)
+    )
+    tf, source = Timeframe(args.timeframe), DataSource(args.source)
+    splits = make_splits(
+        _parse_date(args.start), _parse_date(args.end), holdout_fraction=args.holdout
+    )
+    store = ParquetStore(get_settings().data_dir / "parquet")
+    warm = splits.research_start - pd.Timedelta(seconds=tf.seconds * 3000 * 1.6)
+    bars = store.read_bars(
+        args.symbol.upper(), tf, source=source, start=warm, end=splits.holdout_start
+    )
+    if bars.empty:
+        raise SystemExit(f"no {tf} bars for {args.symbol} ({source}); run `swarm ingest` first")
+    htf = {
+        f.timeframe: store.read_bars(
+            args.symbol.upper(), f.timeframe, source=source, start=warm, end=splits.holdout_start
+        )
+        for f in genome.features()
+        if f.timeframe
+    }
+    cal = MarketCalendar.from_instrument_config(
+        XAUUSD.session_timezone, XAUUSD.trading_hours.model_dump(mode="json")
+    )
+    rep = analyze(
+        genome,
+        bars,
+        tf,
+        splits,
+        calendar=cal,
+        sessions=XAUUSD.model_dump(mode="json")["sessions"],
+        costs=CostConfig.from_instrument(XAUUSD),
+        htf_bars=htf,
+    )
+    d = rep.to_dict()
+    print(explain(genome))
+    if d["skipped_reason"]:
+        raise SystemExit(f"\nskipped: {d['skipped_reason']}")
+    print(
+        f"\nmining until {d['windows']['mine_end'][:10]}, testing "
+        f"{d['windows']['test_start'][:10]}..{d['windows']['test_end'][:10]} (holdout untouched)"
+    )
+    print(f"base: mining {d['base']['mining']}  |  testing {d['base']['oos']}")
+    print("\nwhat drives this strategy's results (permutation importance):")
+    for imp in d["importance"][:6]:
+        print(f"  {imp['label']:<55} {imp['importance']:+.4f}")
+    print(
+        f"\n{d['candidates_tested']} rules tested out of sample, {d['validated']} validated, "
+        f"{d['selected']} kept (distinct):"
+    )
+    for r in d["rules"]:
+        mark = "KEEP" if r["selected"] else ("dup " if r["validated"] else "    ")
+        print(
+            f"  [{mark}] {r['rule'][:70]:<70} mining {r['mining']['mean_r']:+.3f}R  "
+            f"OOS {r['oos']['mean_r']:+.3f}R n={r['oos']['n']:<4} Holm p={r['p_adjusted']:.3g}"
+        )
+    for r in d["rules"]:
+        if r["selected"]:
+            print(f"\nrefined strategy ({r['rule']}):\n{r['refined_explanation']}")
+            print(f"testing window: {r['refined_oos']}  DSR {r['refined_dsr']}")
+
+
 def cmd_serve(args: argparse.Namespace) -> None:
     import uvicorn
 
@@ -528,9 +606,24 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--htf", nargs="*", help="higher timeframes the GA may use, e.g. 1h 4h")
     p.add_argument("--min-trades", type=int, default=30)
     p.add_argument("--validate-top", type=int, default=10)
+    p.add_argument(
+        "--meta-top", type=int, default=5, help="strategies to meta-analyze after the run"
+    )
     p.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     p.add_argument("--seed", type=int, default=0)
     p.set_defaults(func=cmd_evolve)
+
+    p = sub.add_parser("meta", help="find (and test) the contexts in which a strategy works")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--template")
+    g.add_argument("--genome", help="path to a genome JSON file")
+    p.add_argument("--symbol", default=settings.default_symbol)
+    p.add_argument("--timeframe", default="15m")
+    p.add_argument("--source", default="dukascopy")
+    p.add_argument("--start", required=True)
+    p.add_argument("--end", required=True)
+    p.add_argument("--holdout", type=float, default=0.2)
+    p.set_defaults(func=cmd_meta)
 
     args = parser.parse_args(argv)
     if args.command == "evolve" and not args.resume and not (args.start and args.end):
