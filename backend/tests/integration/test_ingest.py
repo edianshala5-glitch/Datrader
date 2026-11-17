@@ -135,7 +135,12 @@ async def test_unknown_instrument(engine: AsyncEngine, tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- API
-async def _prepare(url: str, data_dir: Path) -> None:
+async def _prepare(
+    url: str,
+    data_dir: Path,
+    start: datetime = datetime(2024, 3, 3, tzinfo=UTC),
+    end: datetime = datetime(2024, 3, 9, tzinfo=UTC),
+) -> None:
     engine = create_engine(url)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -148,8 +153,8 @@ async def _prepare(url: str, data_dir: Path) -> None:
         ParquetStore(data_dir / "parquet"),
         InMemoryEventBus(),
         SyntheticSource("XAUUSD", MarketCalendar.xauusd()),
-        start=datetime(2024, 3, 3, tzinfo=UTC),
-        end=datetime(2024, 3, 9, tzinfo=UTC),
+        start=start,
+        end=end,
     )
     await engine.dispose()
 
@@ -302,3 +307,43 @@ def test_backtest_api(tmp_path: Path) -> None:
             json={**body, "start": "2030-01-01T00:00:00Z", "end": "2030-02-01T00:00:00Z"},
         )
         assert empty.status_code == 404
+
+
+def test_validate_api(tmp_path: Path) -> None:
+    url = f"sqlite+aiosqlite:///{tmp_path / 'api.db'}"
+    asyncio.run(
+        _prepare(url, tmp_path, datetime(2024, 1, 7, tzinfo=UTC), datetime(2024, 3, 3, tzinfo=UTC))
+    )
+    settings = Settings(_env_file=None, database_url=url, data_dir=tmp_path)  # type: ignore[call-arg]
+    with TestClient(create_app(settings, event_bus=InMemoryEventBus())) as client:
+        genome = next(
+            t for t in client.get("/api/v1/strategy-templates").json() if t["key"] == "ema_pullback"
+        )["genome"]
+        body = {
+            "genome": genome,
+            "timeframe": "5m",
+            "source": "synthetic",
+            "start": "2024-01-07T00:00:00Z",
+            "end": "2024-03-03T00:00:00Z",
+            "n_folds": 2,
+            "min_oos_trades": 10,
+            "n_perturbations": 2,
+            "n_trials": 25,
+        }
+        res = client.post("/api/v1/validate", json=body)
+        assert res.status_code == 200, res.text
+        out = res.json()
+        assert out["n_trials"] == 25 and len(out["folds"]) == 2
+        assert set(out["gates"]) >= {
+            "oos_trades",
+            "deflated_sharpe",
+            "positive_folds",
+            "robustness",
+            "cost_stress",
+        }
+        assert (
+            0 <= out["overfit_risk"] <= 1
+            and out["splits"]["holdout_start"] > out["splits"]["research_start"]
+        )
+        too_many_folds = {**body, "n_folds": 20}
+        assert client.post("/api/v1/validate", json=too_many_folds).status_code == 422

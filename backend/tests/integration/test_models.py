@@ -276,3 +276,110 @@ async def test_persist_backtest_run(session: AsyncSession, xauusd: Instrument) -
     assert len(trades) == result.n_trades
     assert trades[0].context["weekday"] in range(5) and trades[0].entry_ts.tzinfo is not None
     assert sum(t.pnl for t in trades) == pytest.approx(run.trades["pnl"].sum())
+
+
+async def test_validation_persistence_and_holdout_guard(
+    session: AsyncSession, xauusd: Instrument
+) -> None:
+    from datetime import UTC
+    from datetime import datetime as dt
+
+    from app.services.seed import XAUUSD as SPEC
+    from app.services.validation import (
+        HoldoutAlreadyEvaluatedError,
+        apply_validation,
+        record_holdout,
+    )
+    from engine.backtest.runner import CostConfig
+    from engine.data.calendar import MarketCalendar
+    from engine.data.resample import resample_bars
+    from engine.data.sources.synthetic import generate_m1
+    from engine.strategy.templates import template
+    from engine.validation.splits import make_splits
+    from engine.validation.validator import ValidationConfig, evaluate_holdout, validate_genome
+
+    cal = MarketCalendar.xauusd()
+    sessions = SPEC.model_dump(mode="json")["sessions"]
+    bars = resample_bars(
+        generate_m1(dt(2023, 1, 1, tzinfo=UTC), dt(2023, 9, 1, tzinfo=UTC), cal), Timeframe.M15, cal
+    )
+    splits = make_splits("2023-01-01", "2023-09-01", n_folds=3)
+    genome = template("ema_pullback")
+    costs = CostConfig.from_instrument(xauusd)
+    report = validate_genome(
+        genome,
+        bars,
+        Timeframe.M15,
+        splits,
+        calendar=cal,
+        sessions=sessions,
+        costs=costs,
+        config=ValidationConfig(n_perturbations=4, min_oos_trades=20),
+    )
+    strategy = Strategy.from_genome(
+        genome.canonical(), instrument=xauusd, timeframe=Timeframe.M15, origin=StrategyOrigin.SEED
+    )
+    session.add(strategy)
+    await apply_validation(session, strategy, report)
+    await session.commit()
+
+    assert strategy.status in (StrategyStatus.VALIDATED, StrategyStatus.REJECTED)
+    assert strategy.status is (
+        StrategyStatus.VALIDATED if report.passed else StrategyStatus.REJECTED
+    )
+    assert strategy.oos_trades == report.oos_metrics["n_trades"]
+    assert strategy.deflated_sharpe == pytest.approx(report.dsr)
+    assert strategy.overfit_risk == pytest.approx(report.overfit_risk)
+    segs = (
+        await session.scalars(
+            select(BacktestResult.segment).where(BacktestResult.strategy_id == strategy.id)
+        )
+    ).all()
+    assert segs.count(Segment.IN_SAMPLE) == 3 and segs.count(Segment.WALK_FORWARD) == 3
+    summary = await session.scalar(
+        select(BacktestResult).where(BacktestResult.segment == Segment.VALIDATION)
+    )
+    assert summary is not None and summary.extra_metrics["validation_report"]["gates"]
+
+    hold = evaluate_holdout(
+        genome, bars, Timeframe.M15, splits, calendar=cal, sessions=sessions, costs=costs
+    )
+    await record_holdout(session, strategy, hold)
+    await session.commit()
+    with pytest.raises(HoldoutAlreadyEvaluatedError):
+        await record_holdout(session, strategy, hold)
+
+
+async def test_database_enforces_single_holdout(session: AsyncSession, xauusd: Instrument) -> None:
+    """Even code that bypasses the service check cannot store a second holdout result."""
+    s = make_strategy(xauusd, {"holdout": 1})
+    session.add(s)
+    await session.commit()  # committed, so the deliberate failure below can't roll it back
+    sid = s.id  # objects expire on rollback; keep the plain id
+    for i in range(2):
+        session.add(
+            BacktestResult(
+                strategy_id=sid,
+                segment=Segment.HOLDOUT,
+                fold_index=i,
+                period_start=T0,
+                period_end=T0,
+                engine_version="4.0",
+            )
+        )
+    with pytest.raises(IntegrityError):
+        await session.commit()
+    await session.rollback()
+    # other segments may repeat freely
+    for i in range(2):
+        session.add(
+            BacktestResult(
+                strategy_id=sid,
+                segment=Segment.WALK_FORWARD,
+                fold_index=i,
+                period_start=T0,
+                period_end=T0,
+                engine_version="4.0",
+            )
+        )
+    await session.commit()

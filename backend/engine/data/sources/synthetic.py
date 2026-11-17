@@ -10,7 +10,7 @@ strategies find no profit where none exists.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime
 
 import numpy as np
@@ -32,12 +32,16 @@ def generate_m1(
     annual_vol: float = 0.15,
     substeps: int = 8,
     chunk: int = 250_000,
+    drift: Callable[[pd.DatetimeIndex], np.ndarray] | None = None,
 ) -> pd.DataFrame:
     """M1 bars aggregated from a sub-minute random walk.
 
     High/low come from the *same* path as open/close. Wicks drawn independently of the path
     look plausible but are not a martingale: a wick tags a stop and the close snaps back.
     That biases backtests against stop exits (found by the engine's zero-edge test).
+
+    ``drift`` (optional) returns a per-minute log-drift for each minute. It is used by tests to
+    plant a *known* edge (positive control for the validation harness).
     """
     minutes = calendar.open_minutes(pd.Timestamp(start), pd.Timestamp(end))
     n = len(minutes)
@@ -52,6 +56,7 @@ def generate_m1(
     log_vol -= pd.Series(log_vol).rolling(5000, min_periods=1).mean().to_numpy()
     sigma_min = annual_vol / np.sqrt(252 * 23 * 60) * seasonal * np.exp(np.clip(log_vol, -1.0, 1.0))
 
+    mu_min = np.zeros(n) if drift is None else np.asarray(drift(minutes), dtype=np.float64)
     o = np.empty(n)
     h = np.empty(n)
     lo = np.empty(n)
@@ -61,7 +66,7 @@ def generate_m1(
     for a in range(0, n, chunk):
         b = min(a + chunk, n)
         shocks = rng.standard_t(df=4, size=(b - a, substeps)) / t_scale
-        steps = shocks * (sigma_min[a:b, None] / np.sqrt(substeps))
+        steps = shocks * (sigma_min[a:b, None] / np.sqrt(substeps)) + mu_min[a:b, None] / substeps
         path = last + np.cumsum(steps.ravel()).reshape(b - a, substeps)
         opens = np.concatenate([[last], path[:-1, -1]])
         prices = np.exp(path)

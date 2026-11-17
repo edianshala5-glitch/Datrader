@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Float, ForeignKey, Index, String
+from sqlalchemy import Float, ForeignKey, Index, String, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -21,7 +21,18 @@ class BacktestResult(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     plus a filtered re-run for each context rule the Meta-Analyzer proposes."""
 
     __tablename__ = "backtest_results"
-    __table_args__ = (Index("ix_backtest_results_strategy_segment", "strategy_id", "segment"),)
+    __table_args__ = (
+        Index("ix_backtest_results_strategy_segment", "strategy_id", "segment"),
+        # The locked holdout may be evaluated once per strategy. Enforced by the database,
+        # not only by application code, so concurrent requests can't both look.
+        Index(
+            "uq_backtest_results_one_holdout",
+            "strategy_id",
+            unique=True,
+            postgresql_where=text("segment = 'holdout'"),
+            sqlite_where=text("segment = 'holdout'"),
+        ),
+    )
 
     strategy_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("strategies.id", ondelete="CASCADE"))
     context_rule_id: Mapped[uuid.UUID | None] = mapped_column(

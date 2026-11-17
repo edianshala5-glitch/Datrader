@@ -235,6 +235,93 @@ def cmd_backtest(args: argparse.Namespace) -> None:
         print(f"trades written to {args.trades_csv}")
 
 
+def cmd_validate(args: argparse.Namespace) -> None:
+    import pandas as pd
+
+    from app.models.enums import DataSource, Timeframe
+    from app.services.seed import XAUUSD
+    from engine.backtest.runner import CostConfig
+    from engine.data.calendar import MarketCalendar
+    from engine.data.store import ParquetStore
+    from engine.strategy.explain import explain
+    from engine.strategy.genome import Genome
+    from engine.strategy.templates import template
+    from engine.validation.splits import make_splits
+    from engine.validation.validator import validate_genome
+
+    genome = (
+        Genome.model_validate_json(Path(args.genome).read_text())
+        if args.genome
+        else template(args.template)
+    )
+    tf, source = Timeframe(args.timeframe), DataSource(args.source)
+    splits = make_splits(
+        _parse_date(args.start),
+        _parse_date(args.end),
+        holdout_fraction=args.holdout,
+        n_folds=args.folds,
+    )
+    store = ParquetStore(get_settings().data_dir / "parquet")
+    warm = splits.research_start - pd.Timedelta(seconds=tf.seconds * 3000 * 1.6)
+    bars = store.read_bars(
+        args.symbol.upper(), tf, source=source, start=warm, end=splits.holdout_start
+    )
+    if bars.empty:
+        raise SystemExit(f"no {tf} bars for {args.symbol} ({source}); run `swarm ingest` first")
+    htf = {
+        f.timeframe: store.read_bars(
+            args.symbol.upper(), f.timeframe, source=source, start=warm, end=splits.holdout_start
+        )
+        for f in genome.features()
+        if f.timeframe
+    }
+    cal = MarketCalendar.from_instrument_config(
+        XAUUSD.session_timezone, XAUUSD.trading_hours.model_dump(mode="json")
+    )
+    rep = validate_genome(
+        genome,
+        bars,
+        tf,
+        splits,
+        calendar=cal,
+        sessions=XAUUSD.model_dump(mode="json")["sessions"],
+        costs=CostConfig.from_instrument(XAUUSD),
+        htf_bars=htf,
+        n_trials=args.trials,
+    )
+    d = rep.to_dict()
+    print(explain(genome))
+    print(
+        f"\nresearch {splits.research_start.date()} -> {splits.holdout_start.date()} "
+        f"({len(splits.folds)} walk-forward folds); "
+        f"holdout from {splits.holdout_start.date()} untouched"
+    )
+    print(
+        f"\n{'PASSED' if d['passed'] else 'REJECTED'}   overfit risk {d['overfit_risk']:.2f}   "
+        f"(0 = robust, 1 = likely noise)"
+    )
+    for name, g in d["gates"].items():
+        print(
+            f"  [{'ok' if g['passed'] else 'xx'}] {name:<16} {g['value']!s:>10}   needs {g['rule']}"
+        )
+    print(
+        f"\n  OOS: {d['oos']['n_trades']} trades, expectancy {d['oos']['expectancy_r']}R, "
+        f"PF {d['oos']['profit_factor']}, Sharpe {d['oos']['sharpe']}, "
+        f"max DD {d['oos']['max_drawdown']}"
+    )
+    print(
+        f"  walk-forward efficiency {d['wfe']}, "
+        f"Monte Carlo P(loss) {d['monte_carlo'].get('prob_loss')}, "
+        f"95% max DD {d['monte_carlo'].get('max_dd_p95')}"
+    )
+    for f in d["folds"]:
+        print(
+            f"  fold {f['index']}: {f['test_start'][:10]}..{f['test_end'][:10]}  "
+            f"IS {f['is']['expectancy_r']}R  OOS {f['oos']['expectancy_r']}R "
+            f"({f['oos']['n_trades']} trades)"
+        )
+
+
 def cmd_serve(args: argparse.Namespace) -> None:
     import uvicorn
 
@@ -311,6 +398,20 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--end", required=True)
     p.add_argument("--trades-csv", help="optional path to write the trade list")
     p.set_defaults(func=cmd_backtest)
+
+    p = sub.add_parser("validate", help="walk-forward + overfitting checks for a strategy")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--template")
+    g.add_argument("--genome", help="path to a genome JSON file")
+    p.add_argument("--symbol", default=settings.default_symbol)
+    p.add_argument("--timeframe", default="15m")
+    p.add_argument("--source", default="dukascopy")
+    p.add_argument("--start", required=True)
+    p.add_argument("--end", required=True)
+    p.add_argument("--holdout", type=float, default=0.2, help="fraction kept as locked holdout")
+    p.add_argument("--folds", type=int, default=5)
+    p.add_argument("--trials", type=int, default=1, help="strategies tried before this one (DSR)")
+    p.set_defaults(func=cmd_validate)
 
     args = parser.parse_args(argv)
     args.func(args)

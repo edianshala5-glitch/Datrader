@@ -19,8 +19,8 @@ top 3 out-of-sample **Champions** drive a live signal feed.
 | 2 | Data ingestion (Dukascopy → Parquet lake, quality reports) | ✅ done |
 | 3 | Indicator engine (standard + SMC, lookahead-safe) | ✅ done |
 | 4 | Strategy DSL + numba backtester | ✅ done |
-| 5 | Validation harness (walk-forward, Deflated Sharpe, PBO) | next |
-| 6 | Optimization swarm (DEAP NSGA-II, islands) | |
+| 5 | Validation harness (walk-forward, Deflated Sharpe, PBO) | ✅ done |
+| 6 | Optimization swarm (DEAP NSGA-II, islands) | next |
 | 7 | Meta-Analyzer (context rules) | |
 | 8 | Champions + live signaling | |
 | 9–12 | Next.js dashboard: Lab, Leaderboard, Live Signals | |
@@ -121,6 +121,23 @@ Speed: ~65 ms per backtest over 10 years of 5m bars once features are cached.
 Templates (`smc_choch_fvg`, `sweep_reversal`, `ema_pullback`, `divergence_bbands`) seed the
 GA. Untuned, they all lose after costs on real data, which is the baseline the swarm must beat.
 
+### Validation
+
+```bash
+uv run swarm validate --template ema_pullback --start 2019-01-01 --end 2025-01-01 --trials 500
+```
+
+Every strategy is checked with walk-forward folds plus a locked holdout (evaluated once,
+enforced by the database), the Deflated Sharpe Ratio (penalized for the number of
+strategies tried), PBO, parameter-perturbation robustness, cost stress and Monte Carlo.
+The result is a set of gates and an **overfit-risk score** from 0 (robust) to 1 (likely noise).
+The harness is tested against controls:
+- Edge-free data is rejected.
+- A planted edge is accepted.
+- The best of 50 random strategies is rejected once the trial count is declared.
+
+See [docs/VALIDATION.md](docs/VALIDATION.md).
+
 ### Full stack (Postgres + Redis)
 
 ```bash
@@ -150,7 +167,7 @@ backend/
     schemas/     Pydantic v2 API models + validators for instrument JSON config
     api/v1/      health, instruments, runs, strategies (leaderboard), WebSocket stream
     services/    seed data (XAUUSD definition), ingestion orchestration
-    cli.py       `swarm migrate | seed | serve | ingest | data … | backtest`
+    cli.py       `swarm migrate | seed | serve | ingest | data … | backtest | validate`
   engine/        quant core (no web deps)
     data/        calendar (NY sessions, 17:00 roll), US holidays, Parquet+DuckDB store,
                  resampling, quality reports, sources: dukascopy | csv (MT5) | synthetic
@@ -158,6 +175,7 @@ backend/
                  multi-timeframe alignment, feature matrices + cache
     strategy/    genome DSL (pydantic), compiler → signal arrays, explain, templates
     backtest/    numba simulator, metrics (daily Sharpe/Sortino, PF, R stats), runner
+    validation/  splits (walk-forward + holdout), PSR/DSR, PBO (CSCV), Monte Carlo, validator
   alembic/       migrations (tested for drift against the models on SQLite and Postgres)
   tests/
 docker-compose.yml
@@ -178,5 +196,6 @@ docker-compose.yml
 | GET | `/api/v1/indicators` | indicator catalog (params, ranges, output types) |
 | POST | `/api/v1/backtest` | run a genome over a window (metrics, equity, trades) |
 | GET | `/api/v1/strategy-templates` | starter genomes with explanations |
+| POST | `/api/v1/validate` | walk-forward + overfitting report for a genome |
 | GET | `/api/v1/jobs[/{id}]` | background job progress |
 | WS | `/api/v1/ws/{lab\|signals\|jobs\|system}` | live event stream |

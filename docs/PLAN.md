@@ -63,8 +63,10 @@ Metadata: SQLite for zero setup, Postgres in docker-compose.
    context per trade, persistence, explain(), templates. Integrity: truncation test and
    zero-edge random-walk test (which caught and fixed a wick artifact in the synthetic
    generator).
-5. **Validation**: walk-forward, purged/embargoed CV, holdout lock, DSR, PBO, bootstrap CIs,
-   parameter-perturbation robustness → `overfit_risk`.
+5. **Validation** ✅: anchored or rolling walk-forward with embargo, locked holdout (one evaluation
+   per strategy, enforced by a partial unique index), PSR/DSR, Holm/BH, bootstrap CIs,
+   PBO via CSCV, parameter-perturbation robustness, cost stress, Monte Carlo, an overfit-risk
+   score and gates. Proven with negative, positive and lucky-winner controls (docs/VALIDATION.md).
 6. **Swarm**: DEAP NSGA-II over (OOS Sortino, max DD, trade count, fold stability), island
    model with migration, process-pool workers (Ray optional), resumable checkpoints,
    generation events → Lab.
