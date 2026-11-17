@@ -501,6 +501,145 @@ def cmd_meta(args: argparse.Namespace) -> None:
             print(f"testing window: {r['refined_oos']}  DSR {r['refined_dsr']}")
 
 
+async def _promote(args: argparse.Namespace) -> None:
+    import uuid
+
+    from app.db.session import create_engine, create_sessionmaker
+    from app.models import Strategy
+    from app.services.champions import promote
+    from engine.data.store import ParquetStore
+
+    settings = get_settings()
+    engine = create_engine(settings.database_url)
+    try:
+        async with create_sessionmaker(engine)() as s:
+            strategy = await s.get(Strategy, uuid.UUID(args.strategy_id))
+            if strategy is None:
+                raise SystemExit("strategy not found")
+            res = await promote(
+                s,
+                ParquetStore(settings.data_dir / "parquet"),
+                strategy,
+                start=_parse_date(args.start) if args.start else None,
+                end=_parse_date(args.end) if args.end else None,
+            )
+            await s.commit()
+            print(f"{strategy.name}: {'INCUBATING' if res.passed else 'REJECTED'} ({res.reason})")
+            print(f"holdout: {res.holdout}")
+    finally:
+        await engine.dispose()
+
+
+async def _champions(args: argparse.Namespace) -> None:
+    from sqlalchemy import select
+
+    from app.db.session import create_engine, create_sessionmaker
+    from app.models import Champion, Strategy
+
+    engine = create_engine(get_settings().database_url)
+    try:
+        async with create_sessionmaker(engine)() as s:
+            rows = (
+                await s.execute(
+                    select(Champion, Strategy)
+                    .join(Strategy, Champion.strategy_id == Strategy.id)
+                    .order_by(Champion.rank.asc().nulls_last())
+                )
+            ).all()
+            if not rows:
+                print("no champions yet: validate a strategy, then `swarm promote <id>`")
+            for c, st in rows:
+                live = c.live_stats or {}
+                print(
+                    f"#{c.rank or '-'} {st.name:<10} {c.status.value:<10} {st.timeframe.value:<4} "
+                    f"live n={live.get('n', 0)} mean={live.get('mean_r')} | {st.description or ''}"[
+                        :160
+                    ]
+                )
+    finally:
+        await engine.dispose()
+
+
+async def _live(args: argparse.Namespace) -> None:
+    import signal
+    import threading
+
+    import pandas as pd
+
+    from app.api.v1.live import notifiers_from_settings
+    from app.core.events import create_event_bus
+    from app.db.session import create_engine, create_sessionmaker
+    from app.models.enums import DataSource, Timeframe
+    from app.services.live import LiveService
+    from engine.data.store import ParquetStore
+    from engine.live.feeds import BarFeed, OandaFeed, ReplayFeed
+
+    settings = get_settings()
+    store = ParquetStore(settings.data_dir / "parquet")
+    source = DataSource(args.source)
+    feed: BarFeed
+    if args.feed == "replay":
+        if not args.replay_start:
+            raise SystemExit("--feed replay needs --replay-start")
+        feed = ReplayFeed(
+            store.read_bars(args.symbol.upper(), Timeframe.M1, source=source),
+            pd.Timestamp(_parse_date(args.replay_start)),
+            bars_per_second=args.speed,
+        )
+    else:
+        feed = OandaFeed(
+            token=settings.oanda_token,
+            account_id=settings.oanda_account_id,
+            practice=settings.oanda_practice,
+        )
+    engine = create_engine(settings.database_url)
+    bus = create_event_bus(settings.redis_url, settings.event_channel_prefix)
+    stop = threading.Event()
+    asyncio.get_running_loop().add_signal_handler(signal.SIGINT, stop.set)
+    service = LiveService(
+        create_sessionmaker(engine),
+        store,
+        bus,
+        symbol=args.symbol.upper(),
+        history_source=source,
+        notifiers=notifiers_from_settings(settings),
+    )
+
+    async def show() -> None:
+        from app.core.events import Channel
+
+        async with bus.subscribe(Channel.SIGNALS) as events:
+            async for e in events:
+                p = e.payload
+                if e.type in ("entry", "exit"):
+                    print(f"[{e.type}] {p.get('rationale_text')}")
+                elif e.type in ("champions_changed", "live_started", "live_stopped"):
+                    print(f"[{e.type}] {p}")
+
+    watcher = asyncio.create_task(show())
+    await asyncio.sleep(0)
+    try:
+        await service.run(feed, stop)
+    finally:
+        await asyncio.sleep(0.1)
+        watcher.cancel()
+        print(f"live engine stopped: {service.status}")
+        await bus.close()
+        await engine.dispose()
+
+
+def cmd_promote(args: argparse.Namespace) -> None:
+    asyncio.run(_promote(args))
+
+
+def cmd_champions(args: argparse.Namespace) -> None:
+    asyncio.run(_champions(args))
+
+
+def cmd_live(args: argparse.Namespace) -> None:
+    asyncio.run(_live(args))
+
+
 def cmd_serve(args: argparse.Namespace) -> None:
     import uvicorn
 
@@ -624,6 +763,23 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--end", required=True)
     p.add_argument("--holdout", type=float, default=0.2)
     p.set_defaults(func=cmd_meta)
+
+    p = sub.add_parser("promote", help="holdout-test a validated strategy; on success it incubates")
+    p.add_argument("strategy_id")
+    p.add_argument("--start", help="only for strategies without a run: research start")
+    p.add_argument("--end", help="only for strategies without a run: holdout end")
+    p.set_defaults(func=cmd_promote)
+
+    p = sub.add_parser("champions", help="list champions and their live stats")
+    p.set_defaults(func=cmd_champions)
+
+    p = sub.add_parser("live", help="run the live signal engine for incubating/active champions")
+    p.add_argument("--feed", choices=["oanda", "replay"], default="oanda")
+    p.add_argument("--symbol", default=settings.default_symbol)
+    p.add_argument("--source", default="dukascopy", help="history source for warm-up (and replay)")
+    p.add_argument("--replay-start", help="replay: bars after this time are treated as live")
+    p.add_argument("--speed", type=float, default=0.0, help="replay: M1 bars per second (0 = max)")
+    p.set_defaults(func=cmd_live)
 
     args = parser.parse_args(argv)
     if args.command == "evolve" and not args.resume and not (args.start and args.end):

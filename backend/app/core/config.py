@@ -38,6 +38,16 @@ class Settings(BaseSettings):
 
     default_symbol: str = "XAUUSD"
 
+    # Live feed: OANDA v20 practice account (free). The token can also be injected by a proxy.
+    oanda_token: str | None = None
+    oanda_account_id: str | None = None
+    oanda_practice: bool = True
+
+    # Optional alert channels (active champions only).
+    notify_webhook_url: str | None = None
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
+
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")

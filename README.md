@@ -22,8 +22,8 @@ top 3 out-of-sample **Champions** drive a live signal feed.
 | 5 | Validation harness (walk-forward, Deflated Sharpe, PBO) | ✅ done |
 | 6 | Optimization swarm (NSGA-II, islands) | ✅ done |
 | 7 | Meta-Analyzer (context rules) | ✅ done |
-| 8 | Champions + live signaling | next |
-| 9–12 | Next.js dashboard: Lab, Leaderboard, Live Signals | |
+| 8 | Champions + live signaling | ✅ done |
+| 9–12 | Next.js dashboard: Lab, Leaderboard, Live Signals | next |
 | 13 | Hardening | |
 
 See [docs/PLAN.md](docs/PLAN.md) for the architecture and the full plan.
@@ -181,6 +181,41 @@ It finds the contexts in which a strategy works, e.g. *"trading day Tue AND NY t
 - Runs automatically after each swarm run (`--meta-top`), or via
   `POST /api/v1/strategies/{id}/meta`.
 
+### Champions & live signals
+
+```bash
+uv run swarm promote <strategy-id>     # one-time holdout test; on success the strategy incubates
+uv run swarm champions                 # roster with live stats
+uv run swarm live                      # OANDA practice feed (set SWARM_OANDA_TOKEN)
+uv run swarm live --feed replay --source dukascopy --replay-start 2024-06-02   # dry run on history
+```
+
+**Lifecycle:**
+- `validated → holdout (once) → incubating (paper trading, silent) → active (top 3, notifies)`
+- Demotion happens on a live drawdown beyond 10R, or when live expectancy is significantly below
+  the backtest's.
+- `swarm live` re-evaluates the roster after every closed trade.
+
+**Backtest parity by construction:**
+- On every completed bar, the live engine re-runs the *same* compiler and numba simulator over a
+  rolling window, then diffs the result into entry / fill / exit events.
+- Tests replay a month of bars through feed → aggregator → engine. Every fill and exit (time,
+  price, R, reason) matches a batch backtest exactly.
+- The same holds at the database level, including restarts (no duplicate signals).
+
+**Signals:**
+- Every alert carries a plain-English rationale, e.g.
+  `LONG XAUUSD 15m @ ~2045.30 | Why: liquidity sweep of a swing low …, RSI(14) < 45 (=38.2), in London session |
+  stop 2041.10 / target 2051.60 | Track record: OOS +0.31R/trade over 412 trades, holdout +0.27R`.
+- They stream on `ws/signals`, are stored (`GET /api/v1/signals`), and can notify a webhook
+  (`SWARM_NOTIFY_WEBHOOK_URL`, Discord/Slack) or Telegram (`SWARM_TELEGRAM_BOT_TOKEN` +
+  `SWARM_TELEGRAM_CHAT_ID`).
+
+**Feeds:**
+- **OANDA v20 practice** (free demo account): streaming bid/ask built into M1 bars, candle
+  backfill on start, and reconnects with backoff.
+- **Replay** of stored bars.
+
 ### Full stack (Postgres + Redis)
 
 ```bash
@@ -210,7 +245,7 @@ backend/
     schemas/     Pydantic v2 API models + validators for instrument JSON config
     api/v1/      health, instruments, runs, strategies (leaderboard), WebSocket stream
     services/    seed data (XAUUSD definition), ingestion orchestration
-    cli.py       `swarm migrate | seed | serve | ingest | data … | backtest | validate | evolve | meta`
+    cli.py       `swarm migrate | seed | serve | ingest | data … | backtest | validate | evolve | meta | promote | champions | live`
   engine/        quant core (no web deps)
     data/        calendar (NY sessions, 17:00 roll), US holidays, Parquet+DuckDB store,
                  resampling, quality reports, sources: dukascopy | csv (MT5) | synthetic
@@ -221,6 +256,7 @@ backend/
     validation/  splits (walk-forward + holdout), PSR/DSR, PBO (CSCV), Monte Carlo, validator
     evolution/   NSGA-II, genetic operators (+ mirroring), fitness, parallel evaluator, islands
     meta/        context features, rule mining (GBM importance, trees, beam search), analyzer
+    live/        feeds (OANDA, replay), M1→TF aggregator, parity signal engine, rationale, notifiers
   alembic/       migrations (tested for drift against the models on SQLite and Postgres)
   tests/
 docker-compose.yml
@@ -245,5 +281,8 @@ docker-compose.yml
 | POST | `/api/v1/validate` | walk-forward + overfitting report for a genome |
 | POST | `/api/v1/strategies/{id}/meta`, `/api/v1/meta` | mine + test context rules |
 | GET | `/api/v1/strategies/{id}/rules` | context rules (validated and rejected, with reasons) |
+| GET/POST | `/api/v1/champions`, `/champions/promote/{strategy_id}`, `/champions/{id}/demote`, `/champions/evaluate` | champion lifecycle |
+| GET | `/api/v1/signals[/{id}]` | live signals with rationale |
+| POST/GET | `/api/v1/live/start`, `/live/stop`, `/live/status` | control the live engine |
 | GET | `/api/v1/jobs[/{id}]` | background job progress |
 | WS | `/api/v1/ws/{lab\|signals\|jobs\|system}` | live event stream |

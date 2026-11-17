@@ -77,8 +77,11 @@ Metadata: SQLite for zero setup, Postgres in docker-compose.
    ranked by the significance of kept-trade expectancy. Testing on a later window: Holm
    correction, minimum trades, refined-strategy re-backtest, DSR, distinct-rule selection.
    Rules and refined strategies are persisted with lineage, and run automatically after swarm runs.
-8. **Champions & live signals**: promotion criteria, incubation, demotion on drift.
-   Idempotent signal emission with structured rationale.
+8. **Champions & live signals** ✅: one-time holdout promotion, incubation, top-3 activation by live
+   significance, demotion on drawdown or degradation. Live engine re-runs the backtest
+   simulator per bar (exact parity, tested end to end and at the DB level). OANDA practice feed
+   (stream + backfill + reconnect), replay feed, M1→TF aggregator, idempotent signals with
+   rationale, webhook/Telegram notifiers for active champions only.
 9. **Frontend foundation**: Next.js App Router, TypeScript, Tailwind (dark only), typed
    client generated from OpenAPI.
 10. **Lab**: generation timeline, Pareto scatter, island grid, lineage tree.

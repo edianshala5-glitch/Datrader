@@ -45,6 +45,10 @@ def create_app(settings: Settings | None = None, event_bus: EventBus | None = No
             for _task, stop in list(app.state.runs.values()):
                 stop.set()
             tasks = [t for t, _ in app.state.runs.values()]
+            live = getattr(app.state, "live", None)
+            if live and not live["task"].done():
+                live["stop"].set()
+                tasks.append(live["task"])
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
             await bus.close()
