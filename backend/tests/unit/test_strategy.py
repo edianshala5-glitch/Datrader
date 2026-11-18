@@ -101,10 +101,11 @@ def test_structural_limits() -> None:
     with pytest.raises(ValidationError, match="deeper"):
         genome(entry_long=deep)
     many = group(
-        *[{"type": "event", "feature": f("structure", "bos_bull"), "within": i} for i in range(9)]
+        *[{"type": "event", "feature": f("structure", "bos_bull"), "within": i} for i in range(8)]
     )
-    with pytest.raises(ValidationError, match="exceed"):  # 18 > HARD_MAX_CONDITIONS (16)
-        genome(entry_long=many, entry_short=many)
+    one = group({"type": "event", "feature": f("structure", "bos_bull")})
+    with pytest.raises(ValidationError, match="exceed"):  # 17 > HARD_MAX_CONDITIONS (16)
+        genome(entry_long=many, entry_short=many, filter=one)
 
 
 def test_canonical_roundtrip_keeps_null_target() -> None:
