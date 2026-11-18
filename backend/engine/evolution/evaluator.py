@@ -68,6 +68,12 @@ _W_FP: FeatureProvider | None = None
 
 def _init_worker(ctx: EvalContext) -> None:
     global _W_CTX, _W_FP
+    # Ctrl+C is meant for the main process, which pauses the run after the current
+    # generation. On Windows the console sends it to every worker too; ignoring it keeps
+    # the pool alive instead of breaking it mid-generation.
+    import signal
+
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     _W_CTX = ctx
     _W_FP = FeatureProvider(ctx.bars, ctx.timeframe, ctx.calendar, ctx.sessions, ctx.htf_bars)
 

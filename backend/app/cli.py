@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import os
 import sys
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -84,6 +85,27 @@ def ensure_sqlite_database(database_url: str) -> bool:
     command.upgrade(alembic_config(database_url), "head")
     asyncio.run(_seed(database_url))
     return True
+
+
+def on_ctrl_c(stop: threading.Event, message: str) -> None:
+    """First Ctrl+C sets ``stop`` (graceful), a second one quits immediately.
+
+    Uses the event loop's handler where available and falls back to ``signal.signal`` on
+    Windows, whose event loops don't support ``add_signal_handler``.
+    """
+    import signal
+
+    def first(*_: object) -> None:
+        if stop.is_set():
+            raise KeyboardInterrupt
+        print(f"\n{message}", flush=True)
+        stop.set()
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGINT, first)
+    except (NotImplementedError, RuntimeError):
+        signal.signal(signal.SIGINT, first)
 
 
 def _parse_date(value: str) -> datetime:
@@ -395,7 +417,6 @@ def cmd_validate(args: argparse.Namespace) -> None:
 
 
 async def _evolve(args: argparse.Namespace) -> None:
-    import signal
     import threading
     import uuid
 
@@ -414,7 +435,7 @@ async def _evolve(args: argparse.Namespace) -> None:
         settings.redis_url, settings.event_channel_prefix
     )  # Redis → visible in the UI
     stop = threading.Event()
-    asyncio.get_running_loop().add_signal_handler(signal.SIGINT, stop.set)
+    on_ctrl_c(stop, "pausing after the current generation (Ctrl+C again to force quit)")
     try:
         if args.resume:
             run_id = uuid.UUID(args.resume)
@@ -632,7 +653,6 @@ async def _champions(args: argparse.Namespace) -> None:
 
 
 async def _live(args: argparse.Namespace) -> None:
-    import signal
     import threading
 
     import pandas as pd
@@ -669,7 +689,7 @@ async def _live(args: argparse.Namespace) -> None:
     engine = create_engine(settings.database_url)
     bus = create_event_bus(settings.redis_url, settings.event_channel_prefix)
     stop = threading.Event()
-    asyncio.get_running_loop().add_signal_handler(signal.SIGINT, stop.set)
+    on_ctrl_c(stop, "stopping after the next bar (Ctrl+C again to force quit)")
     service = LiveService(
         create_sessionmaker(engine),
         store,

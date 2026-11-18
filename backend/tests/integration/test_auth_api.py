@@ -226,3 +226,27 @@ def test_cli_initialises_a_fresh_sqlite_database(tmp_path: Path) -> None:
         assert conn.execute("SELECT symbol FROM instruments").fetchall() == [("XAUUSD",)]
     assert ensure_sqlite_database(url) is False  # already initialised: no-op
     assert ensure_sqlite_database("postgresql+asyncpg://u:p@db/x_test") is False
+
+
+async def test_ctrl_c_handler_falls_back_on_windows_event_loops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import signal
+
+    from app.cli import on_ctrl_c
+
+    loop = asyncio.get_running_loop()
+
+    def unsupported(*_: Any) -> None:
+        raise NotImplementedError  # what Windows event loops do
+
+    monkeypatch.setattr(loop, "add_signal_handler", unsupported)
+    installed: dict[int, Any] = {}
+    monkeypatch.setattr(signal, "signal", lambda sig, fn: installed.__setitem__(sig, fn))
+    stop = threading.Event()
+    on_ctrl_c(stop, "pausing")
+    handler = installed[signal.SIGINT]
+    handler(signal.SIGINT, None)
+    assert stop.is_set()
+    with pytest.raises(KeyboardInterrupt):  # second Ctrl+C forces quit
+        handler(signal.SIGINT, None)
