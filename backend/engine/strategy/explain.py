@@ -23,11 +23,29 @@ from engine.strategy.genome import (
     RRTarget,
     StateCond,
     SwingStop,
+    ZoneStop,
+    ZoneTarget,
 )
 
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri"]
 
 _NICE = {
+    ("sd_zones", "demand_ready"): "demand zone ready (BOS + slow pullback)",
+    ("sd_zones", "supply_ready"): "supply zone ready (BOS + slow pullback)",
+    ("sd_zones", "demand_high"): "demand zone top",
+    ("sd_zones", "demand_low"): "demand zone bottom",
+    ("sd_zones", "supply_high"): "supply zone top",
+    ("sd_zones", "supply_low"): "supply zone bottom",
+    ("sd_zones", "demand_target"): "demand impulse high",
+    ("sd_zones", "supply_target"): "supply impulse low",
+    ("candles", "bull_rejection"): "bullish rejection candle",
+    ("candles", "bear_rejection"): "bearish rejection candle",
+    ("candles", "bull_engulfing"): "bullish engulfing",
+    ("candles", "bear_engulfing"): "bearish engulfing",
+    ("candles", "bull_three"): "three rising bullish candles",
+    ("candles", "bear_three"): "three falling bearish candles",
+    ("candles", "bull_any"): "bullish confirmation candle",
+    ("candles", "bear_any"): "bearish confirmation candle",
     ("structure", "bos_bull"): "bullish BOS",
     ("structure", "bos_bear"): "bearish BOS",
     ("structure", "choch_bull"): "bullish CHoCH",
@@ -157,6 +175,8 @@ def explain(genome: Genome) -> str:
         s = f"stop {stop.mult:g}x ATR({stop.length})"
     elif isinstance(stop, SwingStop):
         s = f"stop beyond the last swing (length {stop.length}) + {stop.buffer_atr:g} ATR"
+    elif isinstance(stop, ZoneStop):
+        s = f"stop beyond the zone + {stop.buffer_frac:.0%} of its height"
     else:
         assert isinstance(stop, PercentStop)
         s = f"stop {stop.pct:g}%"
@@ -165,6 +185,8 @@ def explain(genome: Genome) -> str:
         parts.append(f"target {ex.target.ratio:g}R")
     elif isinstance(ex.target, AtrTarget):
         parts.append(f"target {ex.target.mult:g}x ATR({ex.target.length})")
+    elif isinstance(ex.target, ZoneTarget):
+        parts.append(f"target the impulse high/low (min {ex.target.min_rr:g}R)")
     if ex.trailing:
         parts.append(f"trail {ex.trailing.mult:g}x ATR after +{ex.trailing.activate_r:g}R")
     if ex.max_bars:

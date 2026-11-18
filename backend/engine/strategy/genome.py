@@ -277,7 +277,15 @@ class PercentStop(_Strict):
     pct: float = Field(0.3, ge=0.01, le=5)
 
 
-StopRule = Annotated[AtrStop | SwingStop | PercentStop, Field(discriminator="type")]
+class ZoneStop(_Strict):
+    """Beyond the supply/demand zone the entry used (``sd_zones`` feature), plus a buffer of
+    ``buffer_frac`` x zone height: below a demand zone for longs, above supply for shorts."""
+
+    type: Literal["zone"] = "zone"
+    buffer_frac: float = Field(0.1, ge=0, le=1)
+
+
+StopRule = Annotated[AtrStop | SwingStop | PercentStop | ZoneStop, Field(discriminator="type")]
 
 
 class RRTarget(_Strict):
@@ -291,7 +299,15 @@ class AtrTarget(_Strict):
     length: int = Field(14, ge=2, le=100)
 
 
-TargetRule = Annotated[RRTarget | AtrTarget, Field(discriminator="type")]
+class ZoneTarget(_Strict):
+    """At the extreme of the impulse that created the zone (high for longs, low for shorts).
+    Trades whose reward/risk at decision time is below ``min_rr`` are skipped."""
+
+    type: Literal["zone"] = "zone"
+    min_rr: float = Field(1.0, ge=0, le=10)
+
+
+TargetRule = Annotated[RRTarget | AtrTarget | ZoneTarget, Field(discriminator="type")]
 
 
 class AtrTrail(_Strict):
@@ -338,7 +354,18 @@ class Genome(_Strict):
                     total += 1
         if total > MAX_CONDITIONS:
             raise ValueError(f"{total} conditions exceed the limit of {MAX_CONDITIONS}")
+        uses_zone = isinstance(self.exit.stop, ZoneStop) or isinstance(self.exit.target, ZoneTarget)
+        if uses_zone and self.zone_feature() is None:
+            raise ValueError("zone stop/target needs an sd_zones feature in the entry conditions")
         return self
+
+    def zone_feature(self) -> FeatureSpec | None:
+        """The ``sd_zones`` feature the entries use (zone stops/targets read the same zone)."""
+        zones = sorted(
+            (f for f in self.features() if f.indicator == "sd_zones"),
+            key=lambda f: (str(f.timeframe), sorted(f.params.items())),
+        )
+        return zones[0] if zones else None
 
     def condition_roots(self) -> list[Group]:
         roots = [

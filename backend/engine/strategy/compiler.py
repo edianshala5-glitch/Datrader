@@ -40,6 +40,8 @@ from engine.strategy.genome import (
     RRTarget,
     StateCond,
     SwingStop,
+    ZoneStop,
+    ZoneTarget,
 )
 
 BoolArray = npt.NDArray[np.bool_]
@@ -232,6 +234,14 @@ def flat_bars(
     return np.asarray(gap | closed)
 
 
+def _zone(genome: Genome, fp: FeatureProvider, output: str) -> FloatArray:
+    """A level of the zone the entry conditions use, aligned to the strategy's bars."""
+    spec = genome.zone_feature()
+    assert spec is not None  # guaranteed by Genome validation
+    values: FloatArray = fp.get(spec.model_copy(update={"output": output}))
+    return values
+
+
 def compile_genome(genome: Genome, fp: FeatureProvider) -> Signals:
     n = len(fp)
     false = np.zeros(n, dtype=bool)
@@ -261,6 +271,14 @@ def compile_genome(genome: Genome, fp: FeatureProvider) -> Signals:
             too_wide_s = (lvl_s - close) > stop.max_atr * atr
             lvl_l = np.where(too_wide_l | (lvl_l >= close), np.nan, lvl_l)
             lvl_s = np.where(too_wide_s | (lvl_s <= close), np.nan, lvl_s)
+    elif isinstance(stop, ZoneStop):
+        d_lo, d_hi = _zone(genome, fp, "demand_low"), _zone(genome, fp, "demand_high")
+        s_lo, s_hi = _zone(genome, fp, "supply_low"), _zone(genome, fp, "supply_high")
+        with np.errstate(invalid="ignore"):
+            lvl_l = d_lo - stop.buffer_frac * (d_hi - d_lo)
+            lvl_s = s_hi + stop.buffer_frac * (s_hi - s_lo)
+            lvl_l = np.where(lvl_l >= close, np.nan, lvl_l)
+            lvl_s = np.where(lvl_s <= close, np.nan, lvl_s)
 
     # A trade needs a defined stop at decision time.
     valid_l = ~np.isnan(lvl_l) | ~np.isnan(dist_l)
@@ -269,6 +287,16 @@ def compile_genome(genome: Genome, fp: FeatureProvider) -> Signals:
     tgt = genome.exit.target
     target_rr = tgt.ratio if isinstance(tgt, RRTarget) else np.nan
     t_dist = tgt.mult * atr_values(fp.inputs, tgt.length) if isinstance(tgt, AtrTarget) else nan
+    t_dist_l = t_dist_s = t_dist
+    if isinstance(tgt, ZoneTarget):
+        # Distance from the decision close to the impulse extreme (fills at the next open).
+        with np.errstate(invalid="ignore"):
+            t_dist_l = _zone(genome, fp, "demand_target") - close
+            t_dist_s = close - _zone(genome, fp, "supply_target")
+            risk_l = np.where(np.isnan(lvl_l), dist_l, close - lvl_l)
+            risk_s = np.where(np.isnan(lvl_s), dist_s, lvl_s - close)
+            valid_l &= (t_dist_l > 0) & (t_dist_l >= tgt.min_rr * risk_l)
+            valid_s &= (t_dist_s > 0) & (t_dist_s >= tgt.min_rr * risk_s)
 
     tr = genome.exit.trailing
     trail = tr.mult * atr_values(fp.inputs, tr.length) if tr else nan
@@ -282,8 +310,8 @@ def compile_genome(genome: Genome, fp: FeatureProvider) -> Signals:
         stop_level_short=np.asarray(lvl_s, dtype=np.float64),
         stop_dist_long=np.asarray(dist_l, dtype=np.float64),
         stop_dist_short=np.asarray(dist_s, dtype=np.float64),
-        target_dist_long=np.asarray(t_dist, dtype=np.float64),
-        target_dist_short=np.asarray(t_dist, dtype=np.float64),
+        target_dist_long=np.asarray(t_dist_l, dtype=np.float64),
+        target_dist_short=np.asarray(t_dist_s, dtype=np.float64),
         target_rr=float(target_rr),
         trail_dist=np.asarray(trail, dtype=np.float64),
         trail_activate_r=tr.activate_r if tr else 0.0,

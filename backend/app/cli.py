@@ -8,6 +8,7 @@ import contextlib
 import os
 import sys
 import threading
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -741,6 +742,44 @@ def _d(text: str | None) -> str:
     return (text or "?")[:10]
 
 
+def print_candidate(
+    name: str, description: str | None, rep: dict[str, Any], train_label: str
+) -> None:
+    """One validation report: rule, first training window, every never-seen period, checks."""
+    fs = rep.get("folds") or []
+    train = fs[0]["is"] if fs else {}
+    oos = rep.get("oos") or {}
+    verdict = "VALIDATED" if rep.get("passed") else "rejected"
+    print(f"\n{name}  {verdict}  overfit risk {rep.get('overfit_risk') or 0:.2f}")
+    rule = (description or "").strip().replace("\n", "\n        ")
+    print(f"  rule: {rule}")
+    print(
+        f"  {train_label + ':':<22}{train.get('n_trades', 0):>5} trades  "
+        f"{_fmt_r(train.get('expectancy_r'))}/trade  PF {train.get('profit_factor') or 0:.2f}"
+    )
+    print(
+        f"  {'never-seen periods:':<22}{oos.get('n_trades', 0):>5} trades  "
+        f"{_fmt_r(oos.get('expectancy_r'))}/trade  PF {oos.get('profit_factor') or 0:.2f}  "
+        f"win {100 * (oos.get('win_rate') or 0):.0f}%  "
+        f"(avg win {_fmt_r(oos.get('avg_win_r'))}, avg loss {_fmt_r(oos.get('avg_loss_r'))})"
+    )
+    for f in fs:
+        o = f.get("oos") or {}
+        print(
+            f"     {_d(f.get('test_start'))} -> {_d(f.get('test_end'))}: "
+            f"{o.get('n_trades', 0):>3} trades  {_fmt_r(o.get('expectancy_r'))}/trade"
+        )
+    rob = rep.get("robustness") or {}
+    cost = rep.get("cost_stress") or {}
+    print(
+        f"  nearby parameters profitable: {100 * (rob.get('fraction_positive') or 0):.0f}%   "
+        f"at 2x costs (whole research period): {_fmt_r(cost.get('expectancy_r'))}/trade"
+    )
+    failed = [k for k, g in (rep.get("gates") or {}).items() if not g.get("passed")]
+    if failed:
+        print(f"  failed checks: {', '.join(failed)}")
+
+
 async def _report(args: argparse.Namespace) -> None:
     """Why did a run's candidates pass or fail? Training vs each walk-forward period."""
     from sqlalchemy import select
@@ -801,39 +840,9 @@ async def _report(args: argparse.Namespace) -> None:
     oos_exp: list[Any] = []
     for strategy, rep in reports[: args.top]:
         fs = rep.get("folds") or []
-        train = fs[0]["is"] if fs else {}
-        oos = rep.get("oos") or {}
-        is_exp.append(train.get("expectancy_r"))
-        oos_exp.append(oos.get("expectancy_r"))
-        verdict = "VALIDATED" if rep.get("passed") else "rejected"
-        print(f"\n{strategy.name}  {verdict}  overfit risk {rep.get('overfit_risk') or 0:.2f}")
-        rule = (strategy.description or "").strip().replace("\n", "\n        ")
-        print(f"  rule: {rule}")
-        print(
-            f"  training (GA window): {train.get('n_trades', 0):>4} trades  "
-            f"{_fmt_r(train.get('expectancy_r'))}/trade  PF {train.get('profit_factor') or 0:.2f}"
-        )
-        print(
-            f"  never-seen periods:   {oos.get('n_trades', 0):>4} trades  "
-            f"{_fmt_r(oos.get('expectancy_r'))}/trade  PF {oos.get('profit_factor') or 0:.2f}  "
-            f"win {100 * (oos.get('win_rate') or 0):.0f}%  "
-            f"(avg win {_fmt_r(oos.get('avg_win_r'))}, avg loss {_fmt_r(oos.get('avg_loss_r'))})"
-        )
-        for f in fs:
-            o = f.get("oos") or {}
-            print(
-                f"     {_d(f.get('test_start'))} -> {_d(f.get('test_end'))}: "
-                f"{o.get('n_trades', 0):>3} trades  {_fmt_r(o.get('expectancy_r'))}/trade"
-            )
-        rob = rep.get("robustness") or {}
-        cost = rep.get("cost_stress") or {}
-        print(
-            f"  nearby parameters profitable: {100 * (rob.get('fraction_positive') or 0):.0f}%   "
-            f"at 2x costs (whole research period): {_fmt_r(cost.get('expectancy_r'))}/trade"
-        )
-        failed = [k for k, g in (rep.get("gates") or {}).items() if not g.get("passed")]
-        if failed:
-            print(f"  failed checks: {', '.join(failed)}")
+        is_exp.append((fs[0]["is"] if fs else {}).get("expectancy_r"))
+        oos_exp.append((rep.get("oos") or {}).get("expectancy_r"))
+        print_candidate(strategy.name, strategy.description, rep, "training (GA window)")
 
     def median(xs: list[Any]) -> float | None:
         vals = sorted(x for x in xs if x is not None)
@@ -853,6 +862,163 @@ async def _report(args: argparse.Namespace) -> None:
 
 def cmd_report(args: argparse.Namespace) -> None:
     asyncio.run(_report(args))
+
+
+async def _test_setup(args: argparse.Namespace) -> None:
+    """Validate every variant of the supply/demand setup and store the results."""
+    import pandas as pd
+    from sqlalchemy import func, select
+
+    from app.db.session import create_engine, create_sessionmaker
+    from app.models import Instrument, Strategy
+    from app.models.enums import DataSource, StrategyOrigin, Timeframe
+    from app.services.seed import XAUUSD
+    from app.services.validation import apply_validation, prior_oos_validations
+    from engine.backtest.runner import CostConfig
+    from engine.data.calendar import MarketCalendar
+    from engine.data.store import ParquetStore
+    from engine.memcache import available_memory_bytes
+    from engine.strategy.explain import explain
+    from engine.strategy.setups import sd_zone_setup
+    from engine.validation.splits import make_splits
+    from engine.validation.validator import validate_genome
+
+    if "SWARM_FEATURE_CACHE_MB" not in os.environ:
+        # One process holds years of 1m bars: give its feature cache room (aligned zone
+        # levels are ~30 MB each), but never more than a third of the free RAM.
+        free = available_memory_bytes() or 0
+        os.environ["SWARM_FEATURE_CACHE_MB"] = str(max(384, min(4096, free // 3 // 2**20)))
+
+    settings = get_settings()
+    symbol, source = args.symbol.upper(), DataSource(args.source)
+    exec_tf = Timeframe.M1
+    zone_tfs = [Timeframe(t) for t in args.zone_tf]
+    variants = [(tf, c) for tf in zone_tfs for c in args.confirm]
+    splits = make_splits(
+        _parse_date(args.start),
+        _parse_date(args.end),
+        holdout_fraction=args.holdout,
+        n_folds=args.folds,
+    )
+    store = ParquetStore(settings.data_dir / "parquet")
+    warm = splits.research_start - pd.Timedelta(days=7)
+    print(f"loading 1m bars {splits.research_start.date()} -> {splits.holdout_start.date()} ...")
+    bars = store.read_bars(symbol, exec_tf, source=source, start=warm, end=splits.holdout_start)
+    if bars.empty:
+        raise SystemExit(f"no 1m bars for {symbol} ({source}); run `swarm ingest` first")
+    htf_all = {
+        tf: store.read_bars(symbol, tf, source=source, start=warm, end=splits.holdout_start)
+        for tf in zone_tfs
+    }
+    cal = MarketCalendar.from_instrument_config(
+        XAUUSD.session_timezone, XAUUSD.trading_hours.model_dump(mode="json")
+    )
+    sessions = XAUUSD.model_dump(mode="json")["sessions"]
+    costs = CostConfig.from_instrument(XAUUSD)
+    genomes = [sd_zone_setup(tf, c, min_rr=args.min_rr, zone_params=None) for tf, c in variants]
+
+    engine = create_engine(settings.database_url)
+    try:
+        factory = create_sessionmaker(engine)
+        async with factory() as session:
+            instrument = await session.scalar(select(Instrument).where(Instrument.symbol == symbol))
+            if instrument is None:
+                raise SystemExit(f"unknown instrument {symbol}; run `swarm seed`")
+            hashes = {Strategy.from_genome(g.canonical()).genome_hash for g in genomes}
+            prior = await prior_oos_validations(session, instrument.id, exec_tf)
+            already = await session.scalar(
+                select(func.count())
+                .select_from(Strategy)
+                .where(
+                    Strategy.instrument_id == instrument.id,
+                    Strategy.timeframe == exec_tf,
+                    Strategy.genome_hash.in_(hashes),
+                    Strategy.overfit_risk.is_not(None),
+                )
+            )
+        # Every variant is a trial, and so is every other 1m strategy already judged on the
+        # same out-of-sample years (re-running this command doesn't double count itself).
+        n_trials = len(genomes) + prior - int(already or 0)
+        print(
+            f"testing {len(genomes)} variants of the supply/demand setup on 1m bars "
+            f"(zones on {', '.join(t.value for t in zone_tfs)}); Deflated Sharpe counts "
+            f"{n_trials} trials\n"
+            f"research {splits.research_start.date()} -> {splits.holdout_start.date()} "
+            f"({len(splits.folds)} walk-forward periods); holdout from "
+            f"{splits.holdout_start.date()} stays untouched"
+        )
+        summary = []
+        for (tf, confirm), genome in zip(variants, genomes, strict=True):
+            t0 = time.monotonic()
+            print(f"\n... validating zones {tf.value} + {confirm} confirmation", flush=True)
+            report = await asyncio.to_thread(
+                validate_genome,
+                genome,
+                bars,
+                exec_tf,
+                splits,
+                calendar=cal,
+                sessions=sessions,
+                costs=costs,
+                htf_bars={tf: htf_all[tf]},
+                n_trials=n_trials,
+            )
+            rep = report.to_dict()
+            async with factory() as session:
+                canonical = genome.canonical()
+                strategy = await session.scalar(
+                    select(Strategy).where(
+                        Strategy.instrument_id == instrument.id,
+                        Strategy.timeframe == exec_tf,
+                        Strategy.genome_hash == Strategy.from_genome(canonical).genome_hash,
+                    )
+                )
+                if strategy is None:
+                    strategy = Strategy.from_genome(
+                        canonical,
+                        instrument=instrument,
+                        timeframe=exec_tf,
+                        origin=StrategyOrigin.MANUAL,
+                        description=explain(genome),
+                    )
+                    session.add(strategy)
+                    await session.flush()
+                await apply_validation(
+                    session,
+                    strategy,
+                    report,
+                    context={
+                        "selection": "user setup (supply/demand zones)",
+                        "variants": len(genomes),
+                    },
+                )
+                await session.commit()
+                name, sid = strategy.name, str(strategy.id)
+            print_candidate(
+                f"{name}  [zones {tf.value} + {confirm}]  ({time.monotonic() - t0:.0f}s)",
+                explain(genome),
+                rep,
+                "first training window",
+            )
+            summary.append((name, sid, tf.value, confirm, rep))
+    finally:
+        await engine.dispose()
+
+    print("\nSummary")
+    for name, sid, tf_v, confirm, rep in summary:
+        oos = rep.get("oos") or {}
+        mark = "VALIDATED" if rep.get("passed") else "rejected "
+        print(
+            f"  {mark}  {name}  zones {tf_v:<3} + {confirm:<9}  "
+            f"{oos.get('n_trades', 0):>4} trades  "
+            f"{_fmt_r(oos.get('expectancy_r'))}/trade  DSR {rep.get('dsr') or 0:.3f}  id {sid}"
+        )
+    if any(r.get("passed") for *_, r in summary):
+        print("\nNext: `swarm promote <id>` runs the one-time holdout test on a validated variant.")
+
+
+def cmd_test_setup(args: argparse.Namespace) -> None:
+    asyncio.run(_test_setup(args))
 
 
 def cmd_promote(args: argparse.Namespace) -> None:
@@ -1099,6 +1265,27 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("champions", help="list champions and their live stats")
     p.set_defaults(func=cmd_champions)
+
+    p = sub.add_parser(
+        "test-setup", help="validate the supply/demand zone setup (zones 5m/15m, entry on 1m)"
+    )
+    p.add_argument("--symbol", default=settings.default_symbol)
+    p.add_argument("--source", default="dukascopy")
+    p.add_argument("--start", default="2016-01-01")
+    p.add_argument("--end", default="now")
+    p.add_argument(
+        "--zone-tf", nargs="+", default=["15m", "5m"], choices=["5m", "15m", "30m", "1h"]
+    )
+    p.add_argument(
+        "--confirm",
+        nargs="+",
+        default=["rejection", "engulfing", "three", "any"],
+        choices=["rejection", "engulfing", "three", "any"],
+    )
+    p.add_argument("--min-rr", type=float, default=1.0, help="skip trades with reward/risk below")
+    p.add_argument("--holdout", type=float, default=0.2)
+    p.add_argument("--folds", type=int, default=5)
+    p.set_defaults(func=cmd_test_setup)
 
     p = sub.add_parser("report", help="why a run's candidates passed or failed validation")
     p.add_argument("--run", help="run id (default: the latest run)")

@@ -44,6 +44,8 @@ _EXIT_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("stop", "percent"): g.PercentStop,
     ("target", "rr"): g.RRTarget,
     ("target", "atr"): g.AtrTarget,
+    ("stop", "zone"): g.ZoneStop,
+    ("target", "zone"): g.ZoneTarget,
     ("trailing", "atr"): g.AtrTrail,
 }
 

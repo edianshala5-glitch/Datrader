@@ -1,6 +1,11 @@
 """Indicator engine. Importing this package registers every indicator."""
 
-from engine.indicators import context, smc, standard  # noqa: F401  (registration side effects)
+from engine.indicators import (  # noqa: F401  (registration side effects)
+    context,
+    smc,
+    standard,
+    zones,
+)
 from engine.indicators.base import (
     REGISTRY,
     Category,
