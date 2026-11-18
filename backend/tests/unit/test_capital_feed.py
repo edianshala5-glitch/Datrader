@@ -308,3 +308,37 @@ async def test_real_websocket_client(monkeypatch: pytest.MonkeyPatch) -> None:
         await feed.aclose()
     assert received[0]["destination"] == "marketData.subscribe"
     assert bar["ts"] == pd.Timestamp("2024-03-05 14:31", tz="UTC") and bar["bid_close"] == 2001.0
+
+
+async def test_diagnose_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    import engine.live.capital as mod
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(_: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(mod.asyncio, "sleep", fast_sleep)
+    calls: list[tuple[str, str]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls.append((req.method, req.url.host))
+        if req.method == "DELETE":
+            return httpx.Response(200, json={"status": "SUCCESS"})
+        if req.url.host.startswith("demo-"):
+            return httpx.Response(401, json={"errorCode": f"error.invalid.details:{USER}"})
+        return httpx.Response(200, headers={"CST": "c", "X-SECURITY-TOKEN": "s"}, json={})
+
+    lines = await mod.diagnose_login(KEY, USER, " pw ", transport=httpx.MockTransport(handler))
+    text = "\n".join(lines)
+    assert "SWARM_CAPITAL_PASSWORD: 4 characters (has spaces at the start/end)" in text
+    assert (
+        "e-mail at example.com" in text
+        and USER not in text
+        and "pw" not in text.lower().replace("password", "")
+    )
+    assert "demo server: HTTP 401, error.invalid.details:<e-mail>" in text
+    assert "live server: LOGIN ACCEPTED (test session closed)" in text
+    assert ("DELETE", "api-capital.backend-capital.com") in calls  # live test session closed
+    missing = await mod.diagnose_login(None, "x", "'quoted'")
+    assert "SWARM_CAPITAL_API_KEY: MISSING" in missing[1] and "wrapped in quotes" in missing[3]

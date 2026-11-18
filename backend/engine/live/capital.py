@@ -291,3 +291,70 @@ class CapitalFeed:
                     extra={"error": type(exc).__name__, "delay_s": delay},
                 )
                 await asyncio.sleep(delay)
+
+
+def _describe_secret(name: str, value: str | None) -> str:
+    """Shape of a configured value (length, stray spaces/quotes) without revealing it."""
+    if not value:
+        return f"  {name}: MISSING"
+    notes = []
+    if value != value.strip():
+        notes.append("has spaces at the start/end")
+    if value[:1] in "\"'" or value[-1:] in "\"'":
+        notes.append("is wrapped in quotes")
+    if " " in value.strip():
+        notes.append("contains spaces")
+    return f"  {name}: {len(value)} characters" + (f" ({', '.join(notes)})" if notes else "")
+
+
+async def diagnose_login(
+    api_key: str | None,
+    identifier: str | None,
+    password: str | None,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> list[str]:
+    """Explain a failed login: config shape, then the raw error code from demo and live.
+
+    A successful test session is closed immediately (``DELETE /session``); nothing else is
+    called. Error codes are shown with the identifier masked.
+    """
+    lines = ["Configuration (values are never shown):"]
+    lines.append(_describe_secret("SWARM_CAPITAL_API_KEY", api_key))
+    if identifier:
+        ok = "@" in identifier and identifier == identifier.strip()
+        domain = identifier.strip().rsplit("@", 1)[-1] if "@" in identifier else "?"
+        lines.append(
+            f"  SWARM_CAPITAL_IDENTIFIER: e-mail at {domain}"
+            + ("" if ok else " (check it: spaces, or no @)")
+        )
+    else:
+        lines.append("  SWARM_CAPITAL_IDENTIFIER: MISSING")
+    lines.append(_describe_secret("SWARM_CAPITAL_PASSWORD", password))
+    if not (api_key and identifier and password):
+        return lines
+
+    async with httpx.AsyncClient(transport=transport, timeout=httpx.Timeout(30)) as client:
+        for label, base in (("demo", DEMO_API), ("live", LIVE_API)):
+            await asyncio.sleep(1.2)  # POST /session: 1 request per second
+            try:
+                r = await client.post(
+                    f"{base}/session",
+                    headers={"X-CAP-API-KEY": api_key},
+                    json={"identifier": identifier, "password": password},
+                )
+            except httpx.HTTPError as exc:
+                lines.append(f"  {label} server: unreachable ({type(exc).__name__})")
+                continue
+            if r.status_code == 200:
+                tokens = {k: r.headers.get(k, "") for k in ("CST", "X-SECURITY-TOKEN")}
+                with contextlib.suppress(httpx.HTTPError):
+                    await client.delete(f"{base}/session", headers=tokens)
+                lines.append(f"  {label} server: LOGIN ACCEPTED (test session closed)")
+                continue
+            code: str = "no error code"
+            with contextlib.suppress(ValueError, AttributeError):
+                raw = r.json().get("errorCode")
+                if isinstance(raw, str):
+                    code = raw.replace(identifier, "<e-mail>")[:120]
+            lines.append(f"  {label} server: HTTP {r.status_code}, {code}")
+    return lines

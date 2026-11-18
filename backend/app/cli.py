@@ -678,7 +678,24 @@ async def _feed_check(args: argparse.Namespace) -> None:
     except CapitalAuthError as exc:
         raise SystemExit(str(exc)) from exc
     try:
-        hist = await feed.backfill(args.history)
+        try:
+            hist = await feed.backfill(args.history)
+        except CapitalAuthError as exc:
+            print(exc)
+            if args.feed == "capital":
+                from engine.live.capital import diagnose_login
+
+                def secret(v: Any) -> str | None:
+                    return v.get_secret_value() if v is not None else None
+
+                print("\nDiagnosis:")
+                for line in await diagnose_login(
+                    secret(settings.capital_api_key),
+                    settings.capital_identifier,
+                    secret(settings.capital_password),
+                ):
+                    print(line)
+            raise SystemExit(1) from exc
         print(f"{args.feed}: login ok, {len(hist)} recent M1 bars")
         if not hist.empty:
             last = hist.iloc[-1]
