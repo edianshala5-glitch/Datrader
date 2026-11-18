@@ -213,3 +213,16 @@ def test_tokens_are_redacted_from_logs() -> None:
     )
     assert RedactTokensFilter().filter(record)
     assert record.getMessage() == '1.2.3.4:5 - "WebSocket /api/v1/ws/lab?token=***&x=1" [accepted]'
+
+
+def test_cli_initialises_a_fresh_sqlite_database(tmp_path: Path) -> None:
+    import sqlite3
+
+    from app.cli import ensure_sqlite_database
+
+    url = f"sqlite+aiosqlite:///{tmp_path / 'new' / 'swarm.db'}"  # folder doesn't exist yet
+    assert ensure_sqlite_database(url) is True
+    with sqlite3.connect(tmp_path / "new" / "swarm.db") as conn:
+        assert conn.execute("SELECT symbol FROM instruments").fetchall() == [("XAUUSD",)]
+    assert ensure_sqlite_database(url) is False  # already initialised: no-op
+    assert ensure_sqlite_database("postgresql+asyncpg://u:p@db/x_test") is False

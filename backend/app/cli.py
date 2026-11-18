@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import os
 import sys
 from datetime import UTC, datetime
@@ -32,12 +33,11 @@ def cmd_migrate(args: argparse.Namespace) -> None:
     command.upgrade(alembic_config(get_settings().database_url), args.revision)
 
 
-async def _seed() -> None:
+async def _seed(database_url: str | None = None) -> None:
     from app.db.session import create_engine, create_sessionmaker, session_scope
     from app.services.seed import seed_reference_data
 
-    settings = get_settings()
-    engine = create_engine(settings.database_url)
+    engine = create_engine(database_url or get_settings().database_url)
     try:
         async for session in session_scope(create_sessionmaker(engine)):
             instruments = await seed_reference_data(session)
@@ -48,6 +48,42 @@ async def _seed() -> None:
 
 def cmd_seed(_: argparse.Namespace) -> None:
     asyncio.run(_seed())
+
+
+# Commands that never touch the database.
+_NO_DB_COMMANDS = frozenset(
+    {"migrate", "seed", "hash-password", "gen-secret", "feed-check", "data"}
+)
+
+
+def ensure_sqlite_database(database_url: str) -> bool:
+    """First run on SQLite: create the folder, apply migrations and seed XAUUSD.
+
+    Returns True if it initialised the database. Postgres is left alone (the API container
+    migrates it on start, and concurrent migrations from several processes would race).
+    """
+    import sqlite3
+
+    from sqlalchemy.engine import make_url
+
+    url = make_url(database_url)
+    if not url.drivername.startswith("sqlite") or not url.database or url.database == ":memory:":
+        return False
+    path = Path(url.database)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        with contextlib.closing(sqlite3.connect(path)) as conn:
+            found = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='instruments'"
+            ).fetchone()
+        if found:
+            return False
+    print(f"First run: creating the database at {path} ...")
+    from alembic import command
+
+    command.upgrade(alembic_config(database_url), "head")
+    asyncio.run(_seed(database_url))
+    return True
 
 
 def _parse_date(value: str) -> datetime:
@@ -917,6 +953,8 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.command == "evolve" and not args.resume and not (args.start and args.end):
         parser.error("evolve needs --start and --end (or --resume)")
+    if args.command not in _NO_DB_COMMANDS:
+        ensure_sqlite_database(settings.database_url)
     args.func(args)
 
 

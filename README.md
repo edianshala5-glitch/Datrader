@@ -36,6 +36,7 @@ cd backend
 uv sync                 # Python 3.12+, installs deps into .venv
 uv run swarm migrate    # creates ./data/swarm.db (SQLite)
 uv run swarm seed       # XAUUSD instrument definition
+                        # (other commands also do migrate + seed on a fresh SQLite DB)
 uv run swarm serve      # http://127.0.0.1:8000/api/docs
 ```
 
