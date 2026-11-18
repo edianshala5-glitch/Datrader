@@ -140,6 +140,9 @@ def test_auth_disabled(tmp_path: Path) -> None:
         assert c.get("/metrics").status_code == 200
         assert c.get("/api/v1/auth/session").json()["auth_enabled"] is False
         assert c.post("/api/v1/auth/login", json={"password": "x"}).status_code == 409
+        res = c.post("/api/v1/live/start", json={"feed": "capital"})
+        assert res.status_code == 422 and "SWARM_CAPITAL_API_KEY" in res.text
+        assert c.get("/api/v1/live/status").json() == {"running": False}
         with c.websocket_connect("/api/v1/ws/signals") as ws:
             ws.close()
 

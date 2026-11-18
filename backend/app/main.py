@@ -92,10 +92,11 @@ def create_app(settings: Settings | None = None, event_bus: EventBus | None = No
                 start_live(
                     app.state,
                     LiveStartRequest(
-                        feed="oanda", history_source=DataSource(settings.live_history_source)
+                        feed=settings.live_feed,
+                        history_source=DataSource(settings.live_history_source),
                     ),
                 )
-                logger.info("live engine autostarted (oanda, supervised)")
+                logger.info("live engine autostarted", extra={"feed": settings.live_feed})
             except (HTTPException, ValueError) as exc:
                 logger.error("live autostart failed", extra={"error": repr(exc)})
         try:

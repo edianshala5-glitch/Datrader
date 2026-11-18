@@ -187,7 +187,8 @@ It finds the contexts in which a strategy works, e.g. *"trading day Tue AND NY t
 ```bash
 uv run swarm promote <strategy-id>     # one-time holdout test; on success the strategy incubates
 uv run swarm champions                 # roster with live stats
-uv run swarm live                      # OANDA practice feed (set SWARM_OANDA_TOKEN)
+uv run swarm feed-check                # test live-feed credentials (login, last bars, 1 live bar)
+uv run swarm live                      # Capital.com demo feed (SWARM_CAPITAL_*), or --feed oanda
 uv run swarm live --feed replay --source dukascopy --replay-start 2024-06-02   # dry run on history
 ```
 
@@ -213,8 +214,10 @@ uv run swarm live --feed replay --source dukascopy --replay-start 2024-06-02   #
   `SWARM_TELEGRAM_CHAT_ID`).
 
 **Feeds:**
-- **OANDA v20 practice** (free demo account): streaming bid/ask built into M1 bars, candle
-  backfill on start, and reconnects with backoff.
+- **Capital.com demo** (free, the default): REST backfill of bid/ask M1 candles, WebSocket
+  quotes built into M1 bars, session keep-alive, and re-login + reconnect with backoff.
+- **OANDA v20 practice** (free demo account, v20 accounts only): streaming bid/ask built into
+  M1 bars, candle backfill on start, and reconnects with backoff.
 - **Replay** of stored bars.
 
 ### Dashboard

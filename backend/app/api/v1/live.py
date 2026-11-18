@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import threading
 import time
@@ -21,10 +22,12 @@ from app.core import metrics
 from app.models import Champion, Signal, Strategy
 from app.models.enums import ChampionStatus, DataSource, SignalKind, SignalStatus, Timeframe
 from app.services.champions import PromotionError, demote, evaluate_champions, promote
+from app.services.feeds import check_live_feed, make_live_feed
 from app.services.live import LiveService, signal_dict
 from app.services.validation import HoldoutAlreadyEvaluatedError
 from engine.data.store import ParquetStore
-from engine.live.feeds import BarFeed, OandaFeed, ReplayFeed
+from engine.live.capital import CapitalAuthError
+from engine.live.feeds import BarFeed, ReplayFeed
 from engine.live.notify import Notifier, TelegramNotifier, WebhookNotifier
 
 router = APIRouter(tags=["live"])
@@ -160,7 +163,7 @@ async def get_signal(signal_id: uuid.UUID, session: SessionDep) -> dict[str, Any
 
 
 class LiveStartRequest(BaseModel):
-    feed: Literal["replay", "oanda"] = "oanda"
+    feed: Literal["replay", "capital", "oanda"] = "capital"
     symbol: str = "XAUUSD"
     history_source: DataSource = DataSource.DUKASCOPY
     replay_start: datetime | None = None  # replay: bars after this time are "live"
@@ -207,11 +210,18 @@ async def supervise_live(
         service.status["supervised"] = True
         state.live["service"] = service
         started = time.monotonic()
+        feed: BarFeed | None = None
         try:
-            await service.run(make_feed(), stop)
+            feed = make_feed()
+            await service.run(feed, stop)
         except Exception as exc:
             logger.exception("live engine crashed")
             service.status["error"] = repr(exc)
+        finally:
+            aclose = getattr(feed, "aclose", None)
+            if aclose is not None:
+                with contextlib.suppress(Exception):
+                    await aclose()
         if stop.is_set():
             return
         if time.monotonic() - started > 600:
@@ -225,7 +235,7 @@ async def supervise_live(
 
 
 def start_live(state: Any, body: LiveStartRequest) -> dict[str, Any]:
-    """Start the engine in the background. OANDA runs are supervised (auto-restart)."""
+    """Start the engine in the background. Broker feeds run supervised (auto-restart)."""
     if getattr(state, "live", None) and not state.live["task"].done():
         raise HTTPException(status.HTTP_409_CONFLICT, "live engine already running")
     settings = state.settings
@@ -243,12 +253,14 @@ def start_live(state: Any, body: LiveStartRequest) -> dict[str, Any]:
         state.live = {"task": task, "stop": stop, "service": service}
         return {"started": True, "feed": body.feed}
 
+    kind = body.feed
+    try:
+        check_live_feed(settings, kind)
+    except CapitalAuthError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+
     def make_feed() -> BarFeed:
-        return OandaFeed(
-            token=settings.oanda_token,
-            account_id=settings.oanda_account_id,
-            practice=settings.oanda_practice,
-        )
+        return make_live_feed(settings, kind)
 
     state.live = {"stop": stop, "service": _make_service(state, body.symbol, body.history_source)}
     state.live["task"] = asyncio.create_task(

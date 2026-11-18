@@ -599,7 +599,7 @@ async def _live(args: argparse.Namespace) -> None:
     from app.models.enums import DataSource, Timeframe
     from app.services.live import LiveService
     from engine.data.store import ParquetStore
-    from engine.live.feeds import BarFeed, OandaFeed, ReplayFeed
+    from engine.live.feeds import BarFeed, ReplayFeed
 
     settings = get_settings()
     store = ParquetStore(settings.data_dir / "parquet")
@@ -614,11 +614,14 @@ async def _live(args: argparse.Namespace) -> None:
             bars_per_second=args.speed,
         )
     else:
-        feed = OandaFeed(
-            token=settings.oanda_token,
-            account_id=settings.oanda_account_id,
-            practice=settings.oanda_practice,
-        )
+        from app.services.feeds import check_live_feed, make_live_feed
+        from engine.live.capital import CapitalAuthError
+
+        try:
+            check_live_feed(settings, args.feed)
+        except CapitalAuthError as exc:
+            raise SystemExit(str(exc)) from exc
+        feed = make_live_feed(settings, args.feed)
     engine = create_engine(settings.database_url)
     bus = create_event_bus(settings.redis_url, settings.event_channel_prefix)
     stop = threading.Event()
@@ -661,6 +664,46 @@ def cmd_promote(args: argparse.Namespace) -> None:
 
 def cmd_champions(args: argparse.Namespace) -> None:
     asyncio.run(_champions(args))
+
+
+async def _feed_check(args: argparse.Namespace) -> None:
+    """Log in, show the newest candles and the next few live bars: a credentials smoke test."""
+    from app.services.feeds import check_live_feed, make_live_feed
+    from engine.live.capital import CapitalAuthError
+
+    settings = get_settings()
+    try:
+        check_live_feed(settings, args.feed)
+        feed = make_live_feed(settings, args.feed)
+    except CapitalAuthError as exc:
+        raise SystemExit(str(exc)) from exc
+    try:
+        hist = await feed.backfill(args.history)
+        print(f"{args.feed}: login ok, {len(hist)} recent M1 bars")
+        if not hist.empty:
+            last = hist.iloc[-1]
+            print(
+                f"  last bar {last['ts']}  bid {last['bid_close']:.2f}  ask {last['ask_close']:.2f}"
+                f"  spread {last['ask_close'] - last['bid_close']:.2f}"
+            )
+        if args.bars:
+            print(f"waiting for {args.bars} live M1 bar(s) (market must be open)...")
+            n = 0
+            async for bar in feed.bars():
+                print(f"  live {bar['ts']}  bid {bar['bid_close']:.2f}  ticks {bar['tick_count']}")
+                n += 1
+                if n >= args.bars:
+                    break
+    except CapitalAuthError as exc:
+        raise SystemExit(str(exc)) from exc
+    finally:
+        aclose = getattr(feed, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+
+def cmd_feed_check(args: argparse.Namespace) -> None:
+    asyncio.run(_feed_check(args))
 
 
 def cmd_live(args: argparse.Namespace) -> None:
@@ -834,8 +877,16 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("champions", help="list champions and their live stats")
     p.set_defaults(func=cmd_champions)
 
+    p = sub.add_parser(
+        "feed-check", help="test live-feed credentials: login, recent bars, live bars"
+    )
+    p.add_argument("--feed", choices=["capital", "oanda"], default=settings.live_feed)
+    p.add_argument("--history", type=int, default=100, help="recent M1 bars to fetch")
+    p.add_argument("--bars", type=int, default=1, help="live M1 bars to wait for (0 = skip)")
+    p.set_defaults(func=cmd_feed_check)
+
     p = sub.add_parser("live", help="run the live signal engine for incubating/active champions")
-    p.add_argument("--feed", choices=["oanda", "replay"], default="oanda")
+    p.add_argument("--feed", choices=["capital", "oanda", "replay"], default=settings.live_feed)
     p.add_argument("--symbol", default=settings.default_symbol)
     p.add_argument("--source", default="dukascopy", help="history source for warm-up (and replay)")
     p.add_argument("--replay-start", help="replay: bars after this time are treated as live")

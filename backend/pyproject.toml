@@ -21,6 +21,7 @@ dependencies = [
     "numba>=0.68.1",
     "scikit-learn>=1.9.1",
     "prometheus-client>=0.21",
+    "websockets>=13",
 ]
 
 [project.scripts]

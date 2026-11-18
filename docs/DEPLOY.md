@@ -89,11 +89,28 @@ holdout test).
 
 ## 6. Live signals (optional, free)
 
-1. Open a free **OANDA practice** account and create an API token (Manage API Access).
-2. In `deploy/.env`, set `SWARM_OANDA_TOKEN=...` and `SWARM_LIVE_AUTOSTART=true`.
-   Optionally set `SWARM_TELEGRAM_BOT_TOKEN` + `SWARM_TELEGRAM_CHAT_ID` or
-   `SWARM_NOTIFY_WEBHOOK_URL` for alerts.
-3. Restart with `make prod-up`.
+1. Open a free **Capital.com demo** account and turn on two-factor authentication.
+2. Go to **Settings → API integrations → Generate new key**, and set a **custom password** for
+   the key. Capital.com keys can trade, but this system only reads prices and never sends
+   orders. Still, use the demo account.
+3. In `deploy/.env`, set `SWARM_CAPITAL_API_KEY`, `SWARM_CAPITAL_IDENTIFIER` (your login
+   e-mail) and `SWARM_CAPITAL_PASSWORD` (the key's custom password).
+4. Test the credentials. This logs in, prints the latest gold bars, and waits for one live bar:
+   ```bash
+   docker compose -f docker-compose.prod.yml --env-file deploy/.env run --rm --no-deps api swarm feed-check
+   ```
+5. Set `SWARM_LIVE_AUTOSTART=true` and restart with `make prod-up`. Optionally set
+   `SWARM_TELEGRAM_BOT_TOKEN` + `SWARM_TELEGRAM_CHAT_ID` or `SWARM_NOTIFY_WEBHOOK_URL`
+   for alerts.
+
+OANDA practice also works (`SWARM_LIVE_FEED=oanda`, `SWARM_OANDA_TOKEN`), but only for
+v20 accounts. Many accounts outside the US/UK, including OANDA Europe's MT4/MT5 accounts,
+can't create an API token.
+
+Note: live bars come from Capital.com, while the history the strategies were tested on comes
+from Dukascopy. The two prices differ by a few cents and the spreads differ. The engine
+charges its own conservative spread floor, so this hardly matters, but it's why the
+incubation period exists.
 
 The engine starts with the API and runs under a supervisor. After a crash (feed outage,
 network loss) it restarts with exponential backoff, from 5 s up to 5 min.
@@ -175,4 +192,5 @@ Update: `git pull && make prod-up`. Images rebuild, and migrations apply on API 
 | Caddy can't get a certificate | The DNS name must resolve to this server, and ports 80/443 must be open in both firewalls. |
 | Dashboard keeps returning to the login page | Token expired, or the password or secret key changed. Sign in again. |
 | `updater` logs `no stored dukascopy M1 bars` | Do the first backfill (step 4). |
-| Live engine shows `restarting_in_s` | Check `make prod-logs` for the feed error (token, network). The supervisor retries on its own. |
+| Live engine shows `restarting_in_s` | Check `make prod-logs` for the feed error (credentials, network). The supervisor retries on its own. `swarm feed-check` tests the credentials. |
+| `Capital.com login refused (HTTP 401)` | Wrong API key, e-mail, or password. Use the key's custom password, not the account password, if you set one. |

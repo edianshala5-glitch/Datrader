@@ -38,6 +38,17 @@ class Settings(BaseSettings):
 
     default_symbol: str = "XAUUSD"
 
+    # Live feed used by autostart and by default: "capital" (Capital.com demo) or "oanda".
+    live_feed: Literal["capital", "oanda"] = "capital"
+
+    # Capital.com (free demo account). API key: Settings > API integrations (needs 2FA).
+    # Use the key's custom password. These keys can trade, but this system never sends orders.
+    capital_api_key: SecretStr | None = None
+    capital_identifier: str | None = None  # login e-mail
+    capital_password: SecretStr | None = None
+    capital_demo: bool = True
+    capital_epic: str = "GOLD"
+
     # Live feed: OANDA v20 practice account (free). The token can also be injected by a proxy.
     oanda_token: str | None = None
     oanda_account_id: str | None = None

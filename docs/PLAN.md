@@ -98,7 +98,8 @@ Metadata: SQLite for zero setup, Postgres in docker-compose.
     - **Auth:** single-user login (scrypt hash, HMAC tokens, lockout), required in prod.
     - **Observability:** request IDs, JSON access logs with token redaction, Prometheus metrics,
       JSON 500s.
-    - **Live engine:** supervised, with auto-restart and optional autostart.
+    - **Live engine:** supervised, with auto-restart and optional autostart. Capital.com demo
+      feed (REST + WebSocket) is the default; OANDA v20 is the alternative.
     - **Data:** incremental ingest (`--start last`).
     - **CI:** GitHub Actions for SQLite, Postgres + Redis, dashboard and Docker builds.
     - **Deployment:** `docker-compose.prod.yml` with Caddy HTTPS, an updater and log rotation;
