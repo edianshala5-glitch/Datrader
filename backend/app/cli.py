@@ -8,6 +8,7 @@ import contextlib
 import os
 import sys
 import threading
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -732,6 +733,128 @@ async def _live(args: argparse.Namespace) -> None:
         await engine.dispose()
 
 
+def _fmt_r(v: Any) -> str:
+    return "  n/a " if v is None else f"{v:+.2f}R"
+
+
+def _d(text: str | None) -> str:
+    return (text or "?")[:10]
+
+
+async def _report(args: argparse.Namespace) -> None:
+    """Why did a run's candidates pass or fail? Training vs each walk-forward period."""
+    from sqlalchemy import select
+
+    from app.db.session import create_engine, create_sessionmaker
+    from app.models import BacktestResult, EvolutionRun, Strategy
+    from app.models.enums import Segment
+
+    engine = create_engine(get_settings().database_url)
+    try:
+        async with create_sessionmaker(engine)() as session:
+            stmt = select(EvolutionRun)
+            stmt = (
+                stmt.where(EvolutionRun.id == uuid.UUID(args.run))
+                if args.run
+                else stmt.order_by(EvolutionRun.created_at.desc()).limit(1)
+            )
+            run = await session.scalar(stmt)
+            if run is None:
+                raise SystemExit("no evolution run found")
+            rows = (
+                await session.execute(
+                    select(Strategy, BacktestResult)
+                    .join(BacktestResult, BacktestResult.strategy_id == Strategy.id)
+                    .where(
+                        Strategy.run_id == run.id,
+                        BacktestResult.segment == Segment.VALIDATION,
+                        BacktestResult.context_rule_id.is_(None),
+                    )
+                )
+            ).all()
+    finally:
+        await engine.dispose()
+
+    splits = run.data_splits or {}
+    folds = splits.get("folds", [])
+    print(f"Run {run.id}  {run.name}  {run.timeframe.value}  status {run.status.value}")
+    if folds:
+        print(
+            f"  GA trained on   {_d(splits.get('research_start'))} -> {_d(folds[0]['train_end'])}"
+        )
+        print(
+            f"  judged on       {_d(folds[0]['test_start'])} -> {_d(folds[-1]['test_end'])}"
+            f"  ({len(folds)} walk-forward periods it never saw)"
+        )
+        print(
+            f"  locked holdout  {_d(splits.get('holdout_start'))} -> "
+            f"{_d(splits.get('holdout_end'))}  (untouched until promotion)"
+        )
+    if not rows:
+        print("\nNo validated candidates in this run.")
+        return
+
+    reports = [(s, (r.extra_metrics or {}).get("validation_report") or {}) for s, r in rows]
+    reports.sort(key=lambda sr: sr[1].get("overfit_risk") or 1.0)
+
+    is_exp: list[Any] = []
+    oos_exp: list[Any] = []
+    for strategy, rep in reports[: args.top]:
+        fs = rep.get("folds") or []
+        train = fs[0]["is"] if fs else {}
+        oos = rep.get("oos") or {}
+        is_exp.append(train.get("expectancy_r"))
+        oos_exp.append(oos.get("expectancy_r"))
+        verdict = "VALIDATED" if rep.get("passed") else "rejected"
+        print(f"\n{strategy.name}  {verdict}  overfit risk {rep.get('overfit_risk') or 0:.2f}")
+        rule = (strategy.description or "").strip().replace("\n", "\n        ")
+        print(f"  rule: {rule}")
+        print(
+            f"  training (GA window): {train.get('n_trades', 0):>4} trades  "
+            f"{_fmt_r(train.get('expectancy_r'))}/trade  PF {train.get('profit_factor') or 0:.2f}"
+        )
+        print(
+            f"  never-seen periods:   {oos.get('n_trades', 0):>4} trades  "
+            f"{_fmt_r(oos.get('expectancy_r'))}/trade  PF {oos.get('profit_factor') or 0:.2f}  "
+            f"win {100 * (oos.get('win_rate') or 0):.0f}%  "
+            f"(avg win {_fmt_r(oos.get('avg_win_r'))}, avg loss {_fmt_r(oos.get('avg_loss_r'))})"
+        )
+        for f in fs:
+            o = f.get("oos") or {}
+            print(
+                f"     {_d(f.get('test_start'))} -> {_d(f.get('test_end'))}: "
+                f"{o.get('n_trades', 0):>3} trades  {_fmt_r(o.get('expectancy_r'))}/trade"
+            )
+        rob = rep.get("robustness") or {}
+        cost = rep.get("cost_stress") or {}
+        print(
+            f"  nearby parameters profitable: {100 * (rob.get('fraction_positive') or 0):.0f}%   "
+            f"at 2x costs (whole research period): {_fmt_r(cost.get('expectancy_r'))}/trade"
+        )
+        failed = [k for k, g in (rep.get("gates") or {}).items() if not g.get("passed")]
+        if failed:
+            print(f"  failed checks: {', '.join(failed)}")
+
+    def median(xs: list[Any]) -> float | None:
+        vals = sorted(x for x in xs if x is not None)
+        return vals[len(vals) // 2] if vals else None
+
+    mi, mo = median(is_exp), median(oos_exp)
+    print(
+        f"\nSummary of {min(len(reports), args.top)} candidates: median "
+        f"{_fmt_r(mi)}/trade in training vs {_fmt_r(mo)}/trade on never-seen periods."
+    )
+    if mi is not None and mo is not None and mi > 0 and mo <= 0:
+        print(
+            "  -> The edge seen in training does not carry over: the rules fit the past "
+            "(overfitting), not a lasting pattern."
+        )
+
+
+def cmd_report(args: argparse.Namespace) -> None:
+    asyncio.run(_report(args))
+
+
 def cmd_promote(args: argparse.Namespace) -> None:
     asyncio.run(_promote(args))
 
@@ -976,6 +1099,11 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("champions", help="list champions and their live stats")
     p.set_defaults(func=cmd_champions)
+
+    p = sub.add_parser("report", help="why a run's candidates passed or failed validation")
+    p.add_argument("--run", help="run id (default: the latest run)")
+    p.add_argument("--top", type=int, default=10)
+    p.set_defaults(func=cmd_report)
 
     p = sub.add_parser(
         "feed-check", help="test live-feed credentials: login, recent bars, live bars"

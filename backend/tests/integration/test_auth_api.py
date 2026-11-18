@@ -250,3 +250,16 @@ async def test_ctrl_c_handler_falls_back_on_windows_event_loops(
     assert stop.is_set()
     with pytest.raises(KeyboardInterrupt):  # second Ctrl+C forces quit
         handler(signal.SIGINT, None)
+
+
+def test_report_without_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.cli import main
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("SWARM_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'r.db'}")
+    get_settings.cache_clear()
+    try:
+        with pytest.raises(SystemExit, match="no evolution run found"):
+            main(["report"])
+    finally:
+        get_settings.cache_clear()
