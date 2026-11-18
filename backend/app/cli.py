@@ -492,6 +492,16 @@ async def _evolve(args: argparse.Namespace) -> None:
                     elif e.type in ("validating", "run_completed", "run_paused", "run_failed"):
                         print(f"[{e.type}] {p}")
 
+        if args.workers is None:
+            from engine.memcache import available_memory_bytes, cache_budget_bytes, default_workers
+
+            args.workers = default_workers()
+            free = available_memory_bytes()
+            free_txt = f"{free / 2**30:.1f} GB RAM free" if free else "free RAM unknown"
+            print(
+                f"using {args.workers} parallel worker(s) ({os.cpu_count()} CPU cores, {free_txt}, "
+                f"~{cache_budget_bytes() // 2**20} MB feature cache each; override with --workers)"
+            )
         watcher = asyncio.create_task(show())
         await asyncio.sleep(0)
         status = await execute_run(
@@ -937,7 +947,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument(
         "--meta-top", type=int, default=5, help="strategies to meta-analyze after the run"
     )
-    p.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="parallel processes (default: what fits the CPU cores and the free RAM)",
+    )
     p.add_argument("--seed", type=int, default=0)
     p.set_defaults(func=cmd_evolve)
 

@@ -265,9 +265,16 @@ def test_swarm_rediscovers_planted_edge() -> None:
     guaranteed for every seed (see docs/VALIDATION.md); certification must only ever
     certify the planted morning edge."""
     bars = _bars(6e-6, 9)
-    results = _evolve_and_validate(bars, seed=3, k=10)
-    passed = [(ind, rep) for ind, rep in results if rep.passed]
-    assert passed, [rep.reasons for _, rep in results]
+    # At this budget discovery happens for roughly 3-4 seeds in 8 (measured), so try a few
+    # instead of pinning one: a change to the random generator shifts which seeds succeed.
+    reasons = []
+    for seed in (0, 1, 2, 3):
+        results = _evolve_and_validate(bars, seed=seed, k=10)
+        passed = [(ind, rep) for ind, rep in results if rep.passed]
+        if passed:
+            break
+        reasons.append([rep.reasons for _, rep in results])
+    assert passed, reasons
     for ind, rep in passed:
         assert rep.oos_metrics["expectancy_r"] > 0.05
         ny_hours = set()

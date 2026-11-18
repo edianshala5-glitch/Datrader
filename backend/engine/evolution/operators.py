@@ -148,6 +148,23 @@ def _feat(
         elif p.low is not None and p.high is not None:
             step = p.step or 0.01
             params[name] = round(float(rng.uniform(p.low, p.high)) / step) * step
+    for a, b in spec.ordered:  # e.g. MACD fast < slow: swap a crossed pair, else use defaults
+        va = params.get(a, spec.params[a].default)
+        vb = params.get(b, spec.params[b].default)
+        if va < vb:
+            continue
+        pa, pb = spec.params[a], spec.params[b]
+        if (
+            va != vb
+            and (pa.low is None or vb >= pa.low)
+            and (pa.high is None or vb <= pa.high)
+            and (pb.low is None or va >= pb.low)
+            and (pb.high is None or va <= pb.high)
+        ):
+            params[a], params[b] = vb, va
+        else:
+            params.pop(a, None)
+            params.pop(b, None)
     params = spec.resolve(params)
     params = {k: v for k, v in params.items() if v != spec.params[k].default}
     out: dict[str, Any] = {"indicator": indicator, "output": output, "params": params}

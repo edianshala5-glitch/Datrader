@@ -27,6 +27,7 @@ import pandas as pd
 
 from app.models.enums import Timeframe
 from engine.data.calendar import MarketCalendar
+from engine.memcache import BoundedCache
 
 FloatArray = npt.NDArray[np.float64]
 Outputs = dict[str, npt.NDArray[Any]]
@@ -120,13 +121,20 @@ class IndicatorSpec:
     outputs: dict[str, Output]
     description: str
     needs_calendar: bool = False
+    # Pairs (a, b) that must satisfy a < b, e.g. MACD fast < slow. Checked at validation time,
+    # so mutation and robustness perturbation retry instead of failing at compute time.
+    ordered: tuple[tuple[str, str], ...] = ()
 
     def resolve(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = dict(params or {})
         unknown = set(params) - set(self.params)
         if unknown:
             raise ValueError(f"{self.name}: unknown params {sorted(unknown)}")
-        return {k: p.validate(k, params.get(k, p.default)) for k, p in self.params.items()}
+        out = {k: p.validate(k, params.get(k, p.default)) for k, p in self.params.items()}
+        for a, b in self.ordered:
+            if not out[a] < out[b]:
+                raise ValueError(f"{self.name}: {a} must be < {b} (got {out[a]} >= {out[b]})")
+        return out
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -158,12 +166,16 @@ def indicator(
     outputs: dict[str, Output],
     description: str,
     needs_calendar: bool = False,
+    ordered: tuple[tuple[str, str], ...] = (),
 ) -> Callable[[Callable[..., Outputs]], Callable[..., Outputs]]:
     def register(fn: Callable[..., Outputs]) -> Callable[..., Outputs]:
         if name in REGISTRY:
             raise ValueError(f"indicator {name!r} registered twice")
+        for a, b in ordered:
+            if a not in (params or {}) or b not in (params or {}):
+                raise ValueError(f"{name}: ordered pair ({a}, {b}) names unknown params")
         REGISTRY[name] = IndicatorSpec(
-            name, fn, category, params or {}, outputs, description, needs_calendar
+            name, fn, category, params or {}, outputs, description, needs_calendar, ordered
         )
         return fn
 
@@ -195,7 +207,8 @@ class Inputs:
     timeframe: Timeframe
     calendar: MarketCalendar | None = None
     sessions: dict[str, dict[str, Any]] = field(default_factory=dict)
-    _cache: dict[Hashable, Any] = field(default_factory=dict, repr=False)
+    # Bounded LRU: unbounded caching exhausted RAM during long swarm runs.
+    _cache: BoundedCache = field(default_factory=lambda: BoundedCache(), repr=False)
 
     @classmethod
     def from_bars(
@@ -225,9 +238,7 @@ class Inputs:
         return len(self.close)
 
     def cached(self, key: Hashable, fn: Callable[[], Any]) -> Any:
-        if key not in self._cache:
-            self._cache[key] = fn()
-        return self._cache[key]
+        return self._cache.get_or_compute(key, fn)
 
     def slice(self, stop: int) -> Inputs:
         """First ``stop`` bars. Used by the lookahead tests."""

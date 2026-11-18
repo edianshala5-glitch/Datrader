@@ -100,6 +100,7 @@ def _sma(inp: Inputs, length: int) -> Outputs:
 
 @indicator(
     "macd",
+    ordered=(("fast", "slow"),),
     category=Category.MOMENTUM,
     params={
         "fast": Param(12, 2, 50, 1),

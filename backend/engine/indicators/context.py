@@ -128,6 +128,7 @@ def _sessions(inp: Inputs) -> Outputs:
 
 @indicator(
     "regime",
+    ordered=(("trend_fast", "trend_slow"),),
     category=Category.REGIME,
     params={
         "window": Param(2000, 200, 20000, 100),

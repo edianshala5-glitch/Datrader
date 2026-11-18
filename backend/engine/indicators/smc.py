@@ -236,6 +236,7 @@ def _order_blocks(inp: Inputs, length: int, lookback: int) -> Outputs:
 
 @indicator(
     "divergence",
+    ordered=(("min_dist", "max_dist"),),
     category=Category.DIVERGENCE,
     params={
         "osc": Param("rsi", choices=("rsi", "macd_hist")),

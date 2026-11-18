@@ -21,6 +21,7 @@ from engine.indicators.kernels import bars_since, confirmed_swings
 from engine.indicators.mtf import align_htf
 from engine.indicators.smc import _ffill
 from engine.indicators.standard import atr_values
+from engine.memcache import BoundedCache, cache_budget_bytes
 from engine.strategy.genome import (
     AtrStop,
     AtrTarget,
@@ -59,9 +60,14 @@ class FeatureProvider:
         self.bars = bars.reset_index(drop=True)
         self.timeframe = timeframe
         self.inputs = Inputs.from_bars(self.bars, timeframe, calendar, sessions)
+        # Memory budget (see engine.memcache): base-timeframe indicators live in the bounded
+        # Inputs cache; this one holds only higher-timeframe arrays aligned to our bars.
+        budget = cache_budget_bytes()
+        self.inputs._cache.max_bytes = budget * 2 // 3
         self._htf_bars = htf_bars or {}
         self._htf_inputs: dict[Timeframe, Inputs] = {}
-        self._cache: dict[FeatureSpec, npt.NDArray[Any]] = {}
+        self._htf_budget = budget // 12
+        self._cache = BoundedCache(budget // 6)
         self._calendar = calendar
         self._sessions = sessions
 
@@ -69,27 +75,28 @@ class FeatureProvider:
         return len(self.bars)
 
     def get(self, spec: FeatureSpec) -> npt.NDArray[Any]:
-        if spec in self._cache:
-            return self._cache[spec]
         if spec.timeframe is None or spec.timeframe is self.timeframe:
-            values = compute(self.inputs, spec.indicator, spec.params)[spec.output]
+            return compute(self.inputs, spec.indicator, spec.params)[spec.output]
+        if spec in self._cache:
+            return self._cache[spec]  # type: ignore[no-any-return]
+        tf = spec.timeframe
+        if tf not in self._htf_bars:
+            raise KeyError(f"genome needs {tf} bars; pass them via htf_bars")
+        if tf not in self._htf_inputs:
+            self._htf_inputs[tf] = Inputs.from_bars(
+                self._htf_bars[tf], tf, self._calendar, self._sessions
+            )
+            self._htf_inputs[tf]._cache.max_bytes = self._htf_budget
+        htf = self._htf_inputs[tf]
+        raw = compute(htf, spec.indicator, spec.params)[spec.output]
+        aligned = align_htf(self.inputs.ts, self.timeframe, htf.ts, tf, pd.DataFrame({"v": raw}))[
+            "v"
+        ]
+        values: npt.NDArray[Any]
+        if raw.dtype == np.bool_:
+            values = aligned.fillna(False).to_numpy(dtype=bool)
         else:
-            tf = spec.timeframe
-            if tf not in self._htf_bars:
-                raise KeyError(f"genome needs {tf} bars; pass them via htf_bars")
-            if tf not in self._htf_inputs:
-                self._htf_inputs[tf] = Inputs.from_bars(
-                    self._htf_bars[tf], tf, self._calendar, self._sessions
-                )
-            htf = self._htf_inputs[tf]
-            raw = compute(htf, spec.indicator, spec.params)[spec.output]
-            aligned = align_htf(
-                self.inputs.ts, self.timeframe, htf.ts, tf, pd.DataFrame({"v": raw})
-            )["v"]
-            if raw.dtype == np.bool_:
-                values = aligned.fillna(False).to_numpy(dtype=bool)
-            else:
-                values = aligned.to_numpy(dtype=np.float64)
+            values = aligned.to_numpy(dtype=np.float64)
         self._cache[spec] = values
         return values
 
