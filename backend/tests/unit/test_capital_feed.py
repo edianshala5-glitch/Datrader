@@ -46,9 +46,14 @@ class FakeCapital:
         self.price_calls: list[dict[str, str]] = []
         self.expire_first_get = expire_first_get
         self.reject_login = False
+        self.server_now: pd.Timestamp | None = None  # GET /time; None = endpoint fails
         self.reject_code = f"error.invalid.details {USER}"  # unsafe: contains the e-mail
 
     def handler(self, req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/time"):
+            if self.server_now is None:
+                return httpx.Response(503)
+            return httpx.Response(200, json={"serverTime": int(self.server_now.timestamp() * 1000)})
         if req.url.path.endswith("/session") and req.method == "POST":
             self.logins.append({"key": req.headers.get("X-CAP-API-KEY"), **json.loads(req.content)})
             if self.reject_login:
@@ -213,7 +218,8 @@ async def test_stream_builds_m1_bars_and_keeps_alive() -> None:
 
 async def test_quiet_market_flushes_last_minute() -> None:
     ws = FakeWs([SUB_OK, _quote("2024-03-05 14:28:10", 2001.0, 2001.3), "idle"])
-    feed, _ = _feed(FakeCapital(), [ws], flush_seconds=0.05)  # clock is 14:30:20
+    ticks = iter(range(0, 10**6, 100))  # local monotonic seconds: +100 s per reading
+    feed, _ = _feed(FakeCapital(), [ws], flush_seconds=0.05, monotonic=lambda: float(next(ticks)))
     agen = feed.bars()
     bar = await asyncio.wait_for(anext(agen), 5)
     await agen.aclose()
@@ -342,3 +348,36 @@ async def test_diagnose_login(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ("DELETE", "api-capital.backend-capital.com") in calls  # live test session closed
     missing = await mod.diagnose_login(None, "x", "'quoted'")
     assert "SWARM_CAPITAL_API_KEY: MISSING" in missing[1] and "wrapped in quotes" in missing[3]
+
+
+async def test_wrong_pc_clock_does_not_complete_a_forming_minute() -> None:
+    """PC clock 90 s fast: without the server time, 14:30 (still forming) would pass."""
+    api = FakeCapital(n_minutes=50)
+    api.server_now = NOW  # 14:30:20 on the server
+    feed, _ = _feed(api, [])
+    feed._clock = lambda: NOW + pd.Timedelta(seconds=90)
+    bars = await feed.backfill(100)
+    await feed.aclose()
+    assert bars["ts"].iloc[-1] == pd.Timestamp("2024-03-05 14:29", tz="UTC")
+    assert feed.status["clock_offset_s"] == pytest.approx(-90, abs=1)
+
+
+async def test_backfilled_minute_is_never_emitted_again() -> None:
+    api = FakeCapital(n_minutes=50)
+    ws = FakeWs(
+        [
+            SUB_OK,
+            _quote("2024-03-05 14:29:58", 1.0, 1.3),  # minute already in the backfill
+            _quote("2024-03-05 14:30:05", 2001.0, 2001.3),
+            _quote("2024-03-05 14:31:01", 2002.0, 2002.3),
+            "idle",
+        ]
+    )
+    feed, _ = _feed(api, [ws], flush_seconds=0.05)
+    hist = await feed.backfill(100)
+    agen = feed.bars()
+    bar = await asyncio.wait_for(anext(agen), 5)
+    await agen.aclose()
+    await feed.aclose()
+    assert hist["ts"].iloc[-1] == pd.Timestamp("2024-03-05 14:29", tz="UTC")
+    assert bar["ts"] == pd.Timestamp("2024-03-05 14:30", tz="UTC") and bar["tick_count"] == 1

@@ -697,6 +697,10 @@ async def _feed_check(args: argparse.Namespace) -> None:
                     print(line)
             raise SystemExit(1) from exc
         print(f"{args.feed}: login ok, {len(hist)} recent M1 bars")
+        offset = getattr(feed, "status", {}).get("clock_offset_s")
+        if offset is not None:
+            side = "behind" if offset > 0 else "ahead of"
+            print(f"  this PC's clock is {abs(offset):.1f} s {side} the server (corrected)")
         if not hist.empty:
             last = hist.iloc[-1]
             print(

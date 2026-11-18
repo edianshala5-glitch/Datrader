@@ -128,6 +128,7 @@ class CapitalFeed:
         flush_seconds: float = 1.0,
         max_reconnects: int | None = None,
         clock: Callable[[], pd.Timestamp] = lambda: pd.Timestamp.now(tz="UTC"),
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if not (api_key and identifier and password):
             raise CapitalAuthError(
@@ -141,11 +142,14 @@ class CapitalFeed:
         self.flush_every = flush_seconds
         self.max_reconnects = max_reconnects
         self._clock = clock
+        self._mono = monotonic
+        self._offset = pd.Timedelta(0)  # server clock - local clock (GET /time)
+        self._last_backfilled: pd.Timestamp | None = None
         self._api_key, self._identifier, self._password = api_key, identifier, password
         self._ws_connect = ws_connect or _default_ws_connect
         self._client = httpx.AsyncClient(transport=transport, timeout=httpx.Timeout(30))
         self._tokens: dict[str, str] | None = None
-        self._last_login = 0.0
+        self._last_login = float("-inf")
         self._corr = itertools.count(1)
         self.status: dict[str, Any] = {"connected": False, "reconnects": 0, "last_tick": None}
 
@@ -154,10 +158,10 @@ class CapitalFeed:
 
     # ------------------------------------------------------------------ REST
     async def _login(self) -> dict[str, str]:
-        wait = 1.1 - (time.monotonic() - self._last_login)  # POST /session: 1 request/s
+        wait = 1.1 - (self._mono() - self._last_login)  # POST /session: 1 request/s
         if wait > 0:
             await asyncio.sleep(wait)
-        self._last_login = time.monotonic()
+        self._last_login = self._mono()
         r = await self._client.post(
             f"{self.api}/session",
             headers={"X-CAP-API-KEY": self._api_key},
@@ -187,9 +191,27 @@ class CapitalFeed:
             return data
         raise CapitalAuthError("Capital.com session rejected after re-login")
 
+    async def _sync_clock(self) -> None:
+        """Measure the server-local clock offset, so a wrong PC clock can't mark a still-forming
+        minute as complete. Keeps the previous offset if the endpoint fails."""
+        try:
+            before = self._clock()
+            r = await self._client.get(f"{self.api}/time")
+            after = self._clock()
+            r.raise_for_status()
+            server = pd.Timestamp(int(r.json()["serverTime"]), unit="ms", tz="UTC")
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            return
+        self._offset = server - (before + (after - before) / 2)
+        self.status["clock_offset_s"] = round(self._offset.total_seconds(), 3)
+
+    def _now(self) -> pd.Timestamp:
+        return self._clock() + self._offset
+
     async def backfill(self, count: int = 5000) -> pd.DataFrame:
         """The latest ``count`` completed M1 bars, paged backwards 1,000 at a time."""
-        now = self._clock()
+        await self._sync_clock()
+        now = self._now()
         rows: dict[pd.Timestamp, Bar] = {}
         to: pd.Timestamp | None = None
         while len(rows) < count:
@@ -208,6 +230,8 @@ class CapitalFeed:
             if len(prices) < MAX_CANDLES:
                 break
         bars = sorted(rows.values(), key=lambda b: b["ts"])[-count:]
+        if bars:
+            self._last_backfilled = bars[-1]["ts"]
         return normalize_bars(pd.DataFrame(bars, columns=BAR_COLUMNS))
 
     # ------------------------------------------------------------------ streaming
@@ -225,24 +249,31 @@ class CapitalFeed:
 
     async def bars(self) -> AsyncIterator[Bar]:
         builder = M1Builder()
+        # Never re-emit a minute the backfill already delivered.
+        builder.last_emitted = self._last_backfilled
         attempt = 0
         bid = ask = None
+        # Market time = last quote's server timestamp + local time elapsed since it arrived.
+        # Immune to a wrong PC clock; used to close a quiet minute.
+        anchor: tuple[pd.Timestamp, float] | None = None
         while True:
             try:
                 await self._login()  # fresh tokens for every (re)connect
                 async with self._ws_connect(self.stream_url) as ws:
                     await ws.send(self._msg("marketData.subscribe", {"epics": [self.epic]}))
                     self.status["connected"] = True
-                    last_ping = time.monotonic()
+                    last_ping = self._mono()
                     while True:
-                        if time.monotonic() - last_ping >= self.keepalive:
+                        if self._mono() - last_ping >= self.keepalive:
                             await ws.send(self._msg("ping"))
-                            last_ping = time.monotonic()
+                            last_ping = self._mono()
                         try:
                             raw = await asyncio.wait_for(ws.recv(), self.flush_every)
                         except TimeoutError:
-                            for bar in builder.flush(self._clock()):
-                                yield bar
+                            if anchor is not None:
+                                elapsed = pd.Timedelta(seconds=self._mono() - anchor[1])
+                                for bar in builder.flush(anchor[0] + elapsed):
+                                    yield bar
                             continue
                         msg = json.loads(raw)
                         if msg.get("destination") == "marketData.subscribe":
@@ -261,6 +292,7 @@ class CapitalFeed:
                         if bid is None or ask is None:
                             continue
                         ts = pd.Timestamp(int(p["timestamp"]), unit="ms", tz="UTC")
+                        anchor = (ts, self._mono())
                         self.status["last_tick"] = ts.isoformat()
                         for bar in builder.add(ts, bid, ask):
                             yield bar
