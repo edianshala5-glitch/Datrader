@@ -340,6 +340,7 @@ class DukascopySource:
         *,
         mode: str = "candles",
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        max_skipped: int = 50,
     ) -> None:
         if mode not in ("candles", "ticks"):
             raise ValueError("mode must be 'candles' or 'ticks'")
@@ -349,6 +350,23 @@ class DukascopySource:
         self.mode = mode
         self.scale = price_scale(self.symbol)
         self._now = now
+        # Files that still failed after all retries. They are skipped (a gap that the next run
+        # fills: failures are never cached) so one bad file can't stop a 10-year download.
+        self.skipped: list[str] = []
+        self.max_skipped = max_skipped
+
+    async def _fetch_or_skip(self, path: str, *, cache: bool) -> bytes | None:
+        try:
+            return await self.client.fetch(path, cache=cache)
+        except DownloadError as exc:
+            self.skipped.append(path)
+            logger.warning("dukascopy file skipped", extra={"path": path, "error": str(exc)})
+            if len(self.skipped) > self.max_skipped:
+                raise DownloadError(
+                    f"{len(self.skipped)} files failed: Dukascopy is unreachable or blocking "
+                    "this connection. Try again later (downloaded files are kept)."
+                ) from exc
+            return None
 
     async def chunks(self, start: datetime, end: datetime) -> AsyncIterator[Chunk]:
         end = min(pd.Timestamp(end).tz_convert("UTC"), pd.Timestamp(self._now()))
@@ -375,10 +393,10 @@ class DukascopySource:
 
         async def one(hour: pd.Timestamp) -> pd.DataFrame:
             h = hour.to_pydatetime()
-            raw = await self.client.fetch(
+            raw = await self._fetch_or_skip(
                 tick_path(self.symbol, h), cache=is_complete(h + timedelta(hours=1), now)
             )
-            return decode_ticks(raw, h, self.scale)
+            return empty_ticks() if raw is None else decode_ticks(raw, h, self.scale)
 
         frames = await asyncio.gather(*(one(h) for h in hours))
         frames = [f for f in frames if not f.empty]
@@ -403,9 +421,11 @@ class DukascopySource:
             d = day.to_pydatetime()
             cacheable = is_complete(d + timedelta(days=1), now)
             bid_raw, ask_raw = await asyncio.gather(
-                self.client.fetch(candle_path(self.symbol, d.date(), "BID"), cache=cacheable),
-                self.client.fetch(candle_path(self.symbol, d.date(), "ASK"), cache=cacheable),
+                self._fetch_or_skip(candle_path(self.symbol, d.date(), "BID"), cache=cacheable),
+                self._fetch_or_skip(candle_path(self.symbol, d.date(), "ASK"), cache=cacheable),
             )
+            if bid_raw is None or ask_raw is None:  # both sides are needed for a bar
+                return empty_bars()
             return merge_candle_sides(
                 decode_candles(bid_raw, d, self.scale), decode_candles(ask_raw, d, self.scale)
             )

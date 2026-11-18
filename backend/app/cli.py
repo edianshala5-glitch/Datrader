@@ -176,6 +176,14 @@ async def _ingest(args: argparse.Namespace) -> None:
             )
         if client is not None:
             print(f"downloader: {client.stats}")
+        skipped = getattr(source, "skipped", [])
+        if skipped:
+            print(f"\n{len(skipped)} file(s) could not be downloaded and were skipped:")
+            for path in skipped[:20]:
+                print(f"  {path}")
+            if len(skipped) > 20:
+                print(f"  ... and {len(skipped) - 20} more")
+            print("Run the same command again later: it fills in only what is missing.")
     finally:
         if client is not None:
             await client.aclose()

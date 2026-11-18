@@ -207,3 +207,42 @@ def test_real_candles_match_real_ticks() -> None:
     hour = candles.set_index("ts").loc[from_ticks.index]
     cols = [c for c in from_ticks.columns if c.startswith(("bid_", "ask_"))]
     np.testing.assert_allclose(hour[cols].to_numpy(), from_ticks[cols].to_numpy(), atol=1e-9)
+
+
+async def test_source_skips_a_persistently_failing_file_and_continues(tmp_path: Path) -> None:
+    """One file that never downloads (503 forever) must not stop a long backfill."""
+    day_ok, day_bad = datetime(2024, 1, 3, tzinfo=UTC), datetime(2024, 1, 4, tzinfo=UTC)
+    bid = _candles(day_ok + pd.Timedelta(hours=10))
+    ask = bid.assign(**{k: bid[k] + 0.3 for k in ("open", "high", "low", "close")})
+    payloads = {
+        "XAUUSD/2024/00/03/BID_candles_min_1.bi5": d.encode_candles(bid, day_ok, 1000),
+        "XAUUSD/2024/00/03/ASK_candles_min_1.bi5": d.encode_candles(ask, day_ok, 1000),
+    }
+    bad = "XAUUSD/2024/00/04/BID_candles_min_1.bi5"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix("/datafeed/")
+        if path == bad:
+            return httpx.Response(503)
+        return httpx.Response(200, content=payloads.get(path, b""))
+
+    async with _client(tmp_path, handler, max_retries=1) as client:
+        src = d.DukascopySource(client, "XAUUSD", MarketCalendar.xauusd(), mode="candles")
+        [chunk] = [c async for c in src.chunks(day_ok, day_bad + pd.Timedelta(days=1))]
+    assert src.skipped == [bad]
+    assert len(chunk.m1) == 5  # the good day is kept
+    assert not (tmp_path / bad).exists()  # failures are never cached: the next run retries
+
+
+async def test_source_gives_up_when_everything_fails(tmp_path: Path) -> None:
+    async with _client(tmp_path, lambda r: httpx.Response(503), max_retries=0) as client:
+        src = d.DukascopySource(
+            client, "XAUUSD", MarketCalendar.xauusd(), mode="candles", max_skipped=3
+        )
+        with pytest.raises(d.DownloadError, match="unreachable or blocking"):
+            _ = [
+                c
+                async for c in src.chunks(
+                    datetime(2024, 1, 2, tzinfo=UTC), datetime(2024, 1, 20, tzinfo=UTC)
+                )
+            ]
