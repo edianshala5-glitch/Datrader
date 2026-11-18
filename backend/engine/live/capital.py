@@ -22,6 +22,7 @@ import contextlib
 import itertools
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator, Callable
 from typing import Any, Protocol
@@ -84,6 +85,31 @@ def _candle(row: dict[str, Any]) -> Bar:
     }
 
 
+_SAFE_CODE = re.compile(r"^error\.[a-z0-9._-]{1,80}$")
+_LOGIN_HINTS = {
+    "error.invalid.details": "wrong e-mail or password. If the API key has a custom password, "
+    "use that, not the account password",
+    "error.invalid.api.key": "the API key is wrong, paused or expired: check it in "
+    "Settings > API integrations, or generate a new one",
+    "error.null.api.key": "the API key is empty: check SWARM_CAPITAL_API_KEY in .env",
+    "error.too-many.requests": "too many logins in a short time: wait a minute and retry",
+}
+
+
+def _login_error(r: httpx.Response) -> str:
+    """Explain a refused login using only Capital.com's error code, never the response body
+    (it can contain the identifier)."""
+    code = None
+    with contextlib.suppress(ValueError, AttributeError):
+        raw = r.json().get("errorCode")
+        if isinstance(raw, str) and _SAFE_CODE.match(raw):
+            code = raw
+    msg = f"Capital.com login refused (HTTP {r.status_code}"
+    msg += f", {code})" if code else ")"
+    hint = _LOGIN_HINTS.get(code or "")
+    return f"{msg}: {hint}" if hint else msg
+
+
 class CapitalFeed:
     name = "capital"
 
@@ -137,9 +163,8 @@ class CapitalFeed:
             headers={"X-CAP-API-KEY": self._api_key},
             json={"identifier": self._identifier, "password": self._password},
         )
-        if r.status_code in (400, 401, 403):
-            # Never echo the body: it can contain the identifier.
-            raise CapitalAuthError(f"Capital.com login refused (HTTP {r.status_code})")
+        if r.status_code in (400, 401, 403, 429):
+            raise CapitalAuthError(_login_error(r))
         r.raise_for_status()
         cst, sec = r.headers.get("CST"), r.headers.get("X-SECURITY-TOKEN")
         if not cst or not sec:

@@ -46,12 +46,13 @@ class FakeCapital:
         self.price_calls: list[dict[str, str]] = []
         self.expire_first_get = expire_first_get
         self.reject_login = False
+        self.reject_code = f"error.invalid.details {USER}"  # unsafe: contains the e-mail
 
     def handler(self, req: httpx.Request) -> httpx.Response:
         if req.url.path.endswith("/session") and req.method == "POST":
             self.logins.append({"key": req.headers.get("X-CAP-API-KEY"), **json.loads(req.content)})
             if self.reject_login:
-                return httpx.Response(401, json={"errorCode": f"error.invalid.details {USER}"})
+                return httpx.Response(401, json={"errorCode": self.reject_code})
             n = len(self.logins)
             return httpx.Response(
                 200,
@@ -162,7 +163,15 @@ async def test_bad_credentials_raise_without_leaking_body() -> None:
     with pytest.raises(CapitalAuthError) as exc:
         await feed.backfill(10)
     await feed.aclose()
+    # The safe error code is shown with a hint; the e-mail inside the code text is not.
     assert "401" in str(exc.value) and USER not in str(exc.value)
+    api2 = FakeCapital()
+    api2.reject_login = True
+    api2.reject_code = "error.invalid.api.key"
+    feed2, _ = _feed(api2, [])
+    with pytest.raises(CapitalAuthError, match=r"error\.invalid\.api\.key\): the API key is wrong"):
+        await feed2.backfill(10)
+    await feed2.aclose()
     with pytest.raises(CapitalAuthError, match="SWARM_CAPITAL_API_KEY"):
         CapitalFeed(api_key=None, identifier=USER, password=PW)
 
