@@ -113,7 +113,7 @@ def test_candle_patterns() -> None:
 
 
 def test_setup_genome_compiles_with_zone_stop_and_target() -> None:
-    g = sd_zone_setup(Timeframe.M15, "any", zone_params=PARAMS)
+    g = sd_zone_setup(Timeframe.M15, "any", zone_params=PARAMS, min_stop_pct=0.0, max_stop_pct=None)
     assert Genome.model_validate(g.canonical()) == g
     text = explain(g)
     assert "demand zone ready" in text and "stop beyond the zone" in text
@@ -162,3 +162,70 @@ def test_zone_stop_requires_a_zone_feature() -> None:
                 "exit": {"stop": {"type": "zone"}, "target": {"type": "zone"}},
             }
         )
+
+
+def test_tracking_several_zones_finds_more_setups() -> None:
+    rng = np.random.default_rng(7)
+    n = 6000
+    close = 2000 + np.cumsum(rng.normal(0, 1.0, n))
+    opn = np.concatenate([[close[0]], close[:-1]])
+    wick = np.abs(rng.normal(0, 0.6, n))
+    rows = list(
+        zip(
+            opn,
+            np.maximum(opn, close) + wick,
+            np.minimum(opn, close) - wick,
+            close,
+            strict=True,
+        )
+    )
+    inp = Inputs.from_bars(_bars(rows), Timeframe.M15)
+    one = compute(inp, "sd_zones", {"max_zones": 1})
+    three = compute(inp, "sd_zones", {"max_zones": 3})
+    assert np.isfinite(three["demand_low"]).sum() > np.isfinite(one["demand_low"]).sum()
+    assert three["demand_ready"].sum() >= one["demand_ready"].sum()
+    with np.errstate(invalid="ignore"):  # every zone sits below its target
+        ok = ~np.isfinite(three["demand_high"]) | (three["demand_high"] < three["demand_target"])
+    assert ok.all()
+
+
+def test_zone_stop_minimum_and_maximum_distance() -> None:
+    base = sd_zone_setup(Timeframe.M15, "any", zone_params=PARAMS).canonical()
+    entry = {
+        "type": "group",
+        "op": "all",
+        "conditions": [
+            {
+                "type": "flag",
+                "feature": {"indicator": "sd_zones", "output": "demand_ready", "params": PARAMS},
+            }
+        ],
+    }
+    bars = _bars(WARM + SETUP + SLOW)
+    i = len(WARM) + len(SETUP) + len(SLOW) - 1  # close 100.6, zone stop 98.9
+
+    def compiled(min_pct: float, max_pct: float | None):  # type: ignore[no-untyped-def]
+        g = Genome.model_validate(
+            {
+                **base,
+                "entry_long": entry,
+                "entry_short": None,
+                "exit": {
+                    **base["exit"],
+                    "stop": {
+                        "type": "zone",
+                        "buffer_frac": 0.1,
+                        "min_pct": min_pct,
+                        "max_pct": max_pct,
+                    },
+                    "target": {"type": "zone", "min_rr": 2.0},
+                },
+            }
+        )
+        return compile_genome(g, FeatureProvider(bars, Timeframe.M15, None))
+
+    wide = compiled(3.0, None)  # 3% minimum: stop pushed to 100.6 * 0.97
+    assert np.isclose(wide.stop_level_long[i], 100.6 * 0.97)
+    assert not wide.entry_long[i]  # target 105.5 is < 2R away with a 3% stop
+    assert not compiled(0.0, 1.0).entry_long[i]  # zone stop is 1.7% away: too wide
+    assert compiled(0.0, 2.0).entry_long[i]  # 4.9 to target vs 1.7 risk: 2.9R

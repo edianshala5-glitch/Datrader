@@ -12,8 +12,9 @@ Encodes this discretionary setup:
    x ATR, and at least ``min_steps`` small lower highs (a stair-step pullback that leaves
    liquidity behind).
 4. The zone dies when a close goes through it, when it gets older than ``max_age`` bars, or
-   ``touch_bars`` bars after price first reaches it (first touch only). A newer BOS replaces
-   it.
+   ``touch_bars`` bars after price first reaches it (first touch only). Up to ``max_zones``
+   zones per side live at once (a new one replaces the oldest); the output is the nearest
+   one to price, preferring zones whose pullback is ready.
 
 Supply zones are the mirror image (computed on negated prices). Everything is evaluated at
 bar close with confirmed swings, so the values at bar ``t`` use only bars ``<= t``.
@@ -58,27 +59,36 @@ def _demand_zones(  # type: ignore[no-untyped-def]
     min_steps,
     max_age,
     touch_bars,
+    max_zones,
 ):
+    """Track up to ``max_zones`` demand zones at once; output the nearest one below price,
+    preferring zones whose pullback qualifies as slow ("ready")."""
     n = h.shape[0]
     z_low = np.full(n, NAN)
     z_high = np.full(n, NAN)
     z_target = np.full(n, NAN)
     ready = np.zeros(n, dtype=np.bool_)
 
+    k = max_zones
+    alive = np.zeros(k, dtype=np.bool_)
+    zl = np.full(k, NAN)
+    zh = np.full(k, NAN)
+    peak = np.full(k, NAN)
+    peak_bar = np.full(k, -1, dtype=np.int64)
+    created = np.full(k, -1, dtype=np.int64)
+    touched = np.zeros(k, dtype=np.bool_)
+    touch_bar = np.full(k, -1, dtype=np.int64)
+    frozen = np.zeros(k, dtype=np.bool_)
+
     level = NAN  # latest unbroken confirmed swing high
     level_pivot = -1
-    active = False
-    zl = zh = peak = NAN
-    created = peak_bar = touch_bar = -1
-    touched = False
-    frozen_ready = False
 
     for i in range(n):
         if sh_event[i]:
             level = sh_price[i]
             level_pivot = sh_pivot[i]
 
-        # --- bullish break of structure: a new zone replaces the old one
+        # --- bullish break of structure creates a zone (replacing the oldest if full)
         if level_pivot >= 0 and not np.isnan(level) and c[i] > level:
             b = level_pivot
             for j in range(level_pivot, i + 1):
@@ -92,53 +102,76 @@ def _demand_zones(  # type: ignore[no-untyped-def]
                 if top - lo[b] < 0.1 * a:  # doji base: use its high instead
                     top = h[b]
                 if top < c[i]:
-                    active = True
-                    zl, zh = lo[b], top
-                    created = i
-                    peak, peak_bar = h[b], b
+                    slot = -1
+                    for s in range(k):
+                        if not alive[s]:
+                            slot = s
+                            break
+                    if slot < 0:
+                        slot = 0
+                        for s in range(1, k):
+                            if created[s] < created[slot]:
+                                slot = s
+                    alive[slot] = True
+                    zl[slot], zh[slot] = lo[b], top
+                    created[slot] = i
+                    peak[slot], peak_bar[slot] = h[b], b
                     for j in range(b, i + 1):
-                        if h[j] >= peak:
-                            peak, peak_bar = h[j], j
-                    touched = False
-                    touch_bar = -1
-                    frozen_ready = False
+                        if h[j] >= peak[slot]:
+                            peak[slot], peak_bar[slot] = h[j], j
+                    touched[slot] = False
+                    touch_bar[slot] = -1
+                    frozen[slot] = False
 
-        if not active:
-            continue
-        if c[i] < zl or i - created > max_age:  # broken through, or stale
-            active = False
-            continue
+        # --- update every live zone
+        for s in range(k):
+            if not alive[s]:
+                continue
+            if c[i] < zl[s] or i - created[s] > max_age:  # broken through, or stale
+                alive[s] = False
+                continue
+            if not touched[s]:
+                if h[i] >= peak[s]:  # impulse still extending: the pullback starts later
+                    peak[s], peak_bar[s] = h[i], i
+                pb = peak_bar[s]
+                ok = i - pb >= approach_bars
+                if ok:
+                    biggest = 0.0
+                    for j in range(pb + 1, i + 1):
+                        r = h[j] - lo[j]
+                        if r > biggest:
+                            biggest = r
+                    ok = biggest <= max_candle_atr * atr[i]
+                if ok and min_steps > 0:
+                    steps = 0
+                    for j in range(pb + 2, i):
+                        if h[j] > h[j - 1] and h[j] >= h[j + 1]:
+                            steps += 1
+                    ok = steps >= min_steps
+                if lo[i] <= zh[s]:  # first touch: keep the verdict on the approach *before* it
+                    touched[s] = True
+                    touch_bar[s] = i
+                else:
+                    frozen[s] = ok
+            elif i - touch_bar[s] >= touch_bars:
+                alive[s] = False  # first touch only
+                continue
 
-        if not touched:
-            if h[i] >= peak:  # impulse still extending: the pullback starts later
-                peak, peak_bar = h[i], i
-            # approach quality over the pullback so far (peak_bar, i]
-            n_ret = i - peak_bar
-            ok = n_ret >= approach_bars
-            if ok:
-                biggest = 0.0
-                for j in range(peak_bar + 1, i + 1):
-                    r = h[j] - lo[j]
-                    if r > biggest:
-                        biggest = r
-                ok = biggest <= max_candle_atr * atr[i]
-            if ok and min_steps > 0:
-                steps = 0
-                for j in range(peak_bar + 2, i):
-                    if h[j] > h[j - 1] and h[j] >= h[j + 1]:
-                        steps += 1
-                ok = steps >= min_steps
-            if lo[i] <= zh:  # first touch: freeze the verdict on the approach *before* it
-                touched = True
-                touch_bar = i
-            else:
-                frozen_ready = ok
-        elif i - touch_bar >= touch_bars:
-            active = False  # first touch only
-            continue
-
-        z_low[i], z_high[i], z_target[i] = zl, zh, peak
-        ready[i] = frozen_ready
+        # --- output: the nearest live zone below price, ready ones first
+        best = -1
+        for s in range(k):
+            if not alive[s]:
+                continue
+            if best < 0:
+                best = s
+            elif frozen[s] != frozen[best]:
+                if frozen[s]:
+                    best = s
+            elif zh[s] > zh[best]:
+                best = s
+        if best >= 0:
+            z_low[i], z_high[i], z_target[i] = zl[best], zh[best], peak[best]
+            ready[i] = frozen[best]
     return z_low, z_high, z_target, ready
 
 
@@ -146,10 +179,11 @@ ZONE_PARAMS = {
     "length": Param(3, 2, 10, 1),  # swing length of the structure that gets broken
     "impulse_atr": Param(1.5, 0.5, 5.0, 0.1),
     "approach_bars": Param(4, 1, 30, 1),
-    "max_candle_atr": Param(1.0, 0.3, 3.0, 0.05),
+    "max_candle_atr": Param(1.8, 0.3, 4.0, 0.05),
     "min_steps": Param(1, 0, 5, 1),
-    "max_age": Param(96, 10, 500, 1),
+    "max_age": Param(300, 10, 2000, 1),
     "touch_bars": Param(2, 1, 10, 1),
+    "max_zones": Param(3, 1, 10, 1),  # zones per side tracked at the same time
 }
 _PRICE = Output(OutputKind.PRICE)
 _WICK = ("wick_ratio",)
@@ -166,6 +200,7 @@ def sd_zone_values(inp: Inputs, **p: float) -> Outputs:
         int(p["min_steps"]),
         int(p["max_age"]),
         int(p["touch_bars"]),
+        int(p["max_zones"]),
     )
     length = int(p["length"])
     sh_e, _, sh_p, _, sh_i, _ = confirmed_swings(inp.high, inp.low, length, length)

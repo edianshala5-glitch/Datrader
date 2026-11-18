@@ -101,9 +101,9 @@ def test_structural_limits() -> None:
     with pytest.raises(ValidationError, match="deeper"):
         genome(entry_long=deep)
     many = group(
-        *[{"type": "event", "feature": f("structure", "bos_bull"), "within": i} for i in range(8)]
+        *[{"type": "event", "feature": f("structure", "bos_bull"), "within": i} for i in range(9)]
     )
-    with pytest.raises(ValidationError, match="exceed"):
+    with pytest.raises(ValidationError, match="exceed"):  # 18 > HARD_MAX_CONDITIONS (16)
         genome(entry_long=many, entry_short=many)
 
 

@@ -34,7 +34,8 @@ from engine.indicators import FeatureRef, OutputKind, get_spec
 from engine.indicators.base import relevant_params
 
 MAX_DEPTH = 3
-MAX_CONDITIONS = 12
+MAX_CONDITIONS = 12  # budget for evolved and meta-refined genomes
+HARD_MAX_CONDITIONS = 16  # any genome, including hand-written setups
 
 NUMERIC_KINDS = {
     OutputKind.PRICE,
@@ -279,10 +280,15 @@ class PercentStop(_Strict):
 
 class ZoneStop(_Strict):
     """Beyond the supply/demand zone the entry used (``sd_zones`` feature), plus a buffer of
-    ``buffer_frac`` x zone height: below a demand zone for longs, above supply for shorts."""
+    ``buffer_frac`` x zone height: below a demand zone for longs, above supply for shorts.
+    At least ``min_pct`` % of price away; trades whose stop would exceed ``max_pct`` % are
+    skipped."""
 
     type: Literal["zone"] = "zone"
     buffer_frac: float = Field(0.1, ge=0, le=1)
+    # Widen the stop to at least min_pct of price; skip trades needing more than max_pct.
+    min_pct: float = Field(0.0, ge=0, le=5)
+    max_pct: float | None = Field(None, gt=0, le=10)
 
 
 StopRule = Annotated[AtrStop | SwingStop | PercentStop | ZoneStop, Field(discriminator="type")]
@@ -352,8 +358,8 @@ class Genome(_Strict):
                     raise ValueError(f"condition tree deeper than {MAX_DEPTH}")
                 if not isinstance(node, Group):
                     total += 1
-        if total > MAX_CONDITIONS:
-            raise ValueError(f"{total} conditions exceed the limit of {MAX_CONDITIONS}")
+        if total > HARD_MAX_CONDITIONS:
+            raise ValueError(f"{total} conditions exceed the limit of {HARD_MAX_CONDITIONS}")
         uses_zone = isinstance(self.exit.stop, ZoneStop) or isinstance(self.exit.target, ZoneTarget)
         if uses_zone and self.zone_feature() is None:
             raise ValueError("zone stop/target needs an sd_zones feature in the entry conditions")

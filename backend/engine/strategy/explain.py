@@ -177,6 +177,10 @@ def explain(genome: Genome) -> str:
         s = f"stop beyond the last swing (length {stop.length}) + {stop.buffer_atr:g} ATR"
     elif isinstance(stop, ZoneStop):
         s = f"stop beyond the zone + {stop.buffer_frac:.0%} of its height"
+        if stop.min_pct:
+            s += f", at least {stop.min_pct:g}% away"
+        if stop.max_pct:
+            s += f" (skip if wider than {stop.max_pct:g}%)"
     else:
         assert isinstance(stop, PercentStop)
         s = f"stop {stop.pct:g}%"

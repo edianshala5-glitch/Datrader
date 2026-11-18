@@ -906,16 +906,28 @@ async def _test_setup(args: argparse.Namespace) -> None:
     bars = store.read_bars(symbol, exec_tf, source=source, start=warm, end=splits.holdout_start)
     if bars.empty:
         raise SystemExit(f"no 1m bars for {symbol} ({source}); run `swarm ingest` first")
+    trend_tf = None if args.trend_tf == "none" else Timeframe(args.trend_tf)
+    genomes = [
+        sd_zone_setup(
+            tf,
+            c,
+            trend_tf=trend_tf,
+            min_rr=args.min_rr,
+            min_stop_pct=args.min_stop_pct,
+            max_stop_pct=args.max_stop_pct or None,
+        )
+        for tf, c in variants
+    ]
+    needed = {f.timeframe for g in genomes for f in g.features() if f.timeframe}
     htf_all = {
         tf: store.read_bars(symbol, tf, source=source, start=warm, end=splits.holdout_start)
-        for tf in zone_tfs
+        for tf in needed
     }
     cal = MarketCalendar.from_instrument_config(
         XAUUSD.session_timezone, XAUUSD.trading_hours.model_dump(mode="json")
     )
     sessions = XAUUSD.model_dump(mode="json")["sessions"]
     costs = CostConfig.from_instrument(XAUUSD)
-    genomes = [sd_zone_setup(tf, c, min_rr=args.min_rr, zone_params=None) for tf, c in variants]
 
     engine = create_engine(settings.database_url)
     try:
@@ -960,7 +972,9 @@ async def _test_setup(args: argparse.Namespace) -> None:
                 calendar=cal,
                 sessions=sessions,
                 costs=costs,
-                htf_bars={tf: htf_all[tf]},
+                htf_bars={
+                    f.timeframe: htf_all[f.timeframe] for f in genome.features() if f.timeframe
+                },
                 n_trials=n_trials,
             )
             rep = report.to_dict()
@@ -1283,6 +1297,13 @@ def main(argv: list[str] | None = None) -> None:
         choices=["rejection", "engulfing", "three", "any"],
     )
     p.add_argument("--min-rr", type=float, default=1.0, help="skip trades with reward/risk below")
+    p.add_argument(
+        "--trend-tf", default="4h", choices=["1h", "4h", "1d", "none"], help="trade with this trend"
+    )
+    p.add_argument("--min-stop-pct", type=float, default=0.3, help="minimum stop, %% of price")
+    p.add_argument(
+        "--max-stop-pct", type=float, default=0.6, help="skip wider stops (%% of price; 0 = off)"
+    )
     p.add_argument("--holdout", type=float, default=0.2)
     p.add_argument("--folds", type=int, default=5)
     p.set_defaults(func=cmd_test_setup)

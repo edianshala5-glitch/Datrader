@@ -277,8 +277,15 @@ def compile_genome(genome: Genome, fp: FeatureProvider) -> Signals:
         with np.errstate(invalid="ignore"):
             lvl_l = d_lo - stop.buffer_frac * (d_hi - d_lo)
             lvl_s = s_hi + stop.buffer_frac * (s_hi - s_lo)
-            lvl_l = np.where(lvl_l >= close, np.nan, lvl_l)
-            lvl_s = np.where(lvl_s <= close, np.nan, lvl_s)
+            if stop.min_pct > 0:
+                lvl_l = np.minimum(lvl_l, close * (1 - stop.min_pct / 100))
+                lvl_s = np.maximum(lvl_s, close * (1 + stop.min_pct / 100))
+            bad_l, bad_s = lvl_l >= close, lvl_s <= close
+            if stop.max_pct is not None:
+                bad_l |= (close - lvl_l) > close * stop.max_pct / 100
+                bad_s |= (lvl_s - close) > close * stop.max_pct / 100
+            lvl_l = np.where(bad_l, np.nan, lvl_l)
+            lvl_s = np.where(bad_s, np.nan, lvl_s)
 
     # A trade needs a defined stop at decision time.
     valid_l = ~np.isnan(lvl_l) | ~np.isnan(dist_l)
