@@ -55,7 +55,7 @@ def cmd_seed(_: argparse.Namespace) -> None:
 
 # Commands that never touch the database.
 _NO_DB_COMMANDS = frozenset(
-    {"migrate", "seed", "hash-password", "gen-secret", "feed-check", "data"}
+    {"migrate", "seed", "hash-password", "gen-secret", "feed-check", "data", "labels-summary"}
 )
 
 
@@ -1035,6 +1035,121 @@ def cmd_test_setup(args: argparse.Namespace) -> None:
     asyncio.run(_test_setup(args))
 
 
+async def _show_trades(args: argparse.Namespace) -> tuple[str, str]:
+    """Build the HTML review page of a stored setup strategy's trades."""
+    import pandas as pd
+    from sqlalchemy import or_, select
+
+    from app.db.session import create_engine, create_sessionmaker
+    from app.models import Strategy
+    from app.models.enums import DataSource, Timeframe
+    from app.services.seed import XAUUSD
+    from app.services.trade_charts import build_examples, render_page
+    from engine.backtest.runner import CostConfig
+    from engine.data.calendar import MarketCalendar
+    from engine.data.store import ParquetStore
+    from engine.strategy.explain import explain
+    from engine.strategy.genome import Genome
+    from engine.validation.splits import make_splits
+
+    settings = get_settings()
+    engine = create_engine(settings.database_url)
+    try:
+        async with create_sessionmaker(engine)() as session:
+            cond = [Strategy.name == args.strategy.upper()]
+            with contextlib.suppress(ValueError):
+                cond.append(Strategy.id == uuid.UUID(args.strategy))
+            strategy = await session.scalar(select(Strategy).where(or_(*cond)))
+    finally:
+        await engine.dispose()
+    if strategy is None:
+        raise SystemExit(f"strategy {args.strategy!r} not found (use the AU-xxxxxx name or id)")
+    genome = Genome.model_validate(strategy.genome)
+    if strategy.timeframe is not Timeframe.M1:
+        raise SystemExit("show-trades works on test-setup strategies (1m execution)")
+
+    # Research period only: the locked holdout stays unseen.
+    splits = make_splits(
+        _parse_date(args.start), _parse_date(args.end), holdout_fraction=0.2, n_folds=5
+    )
+    store = ParquetStore(settings.data_dir / "parquet")
+    source = DataSource(args.source)
+    symbol = XAUUSD.symbol
+    warm = splits.research_start - pd.Timedelta(days=7)
+    print(f"loading bars and backtesting {strategy.name} ...")
+    bars = store.read_bars(
+        symbol, Timeframe.M1, source=source, start=warm, end=splits.holdout_start
+    )
+    needed = {f.timeframe for f in genome.features() if f.timeframe}
+    htf = {
+        tf: store.read_bars(symbol, tf, source=source, start=warm, end=splits.holdout_start)
+        for tf in needed
+    }
+    cal = MarketCalendar.from_instrument_config(
+        XAUUSD.session_timezone, XAUUSD.trading_hours.model_dump(mode="json")
+    )
+    examples, metrics = build_examples(
+        genome,
+        bars,
+        htf,
+        calendar=cal,
+        sessions=XAUUSD.model_dump(mode="json")["sessions"],
+        costs=CostConfig.from_instrument(XAUUSD),
+        start=splits.research_start,
+        end=splits.holdout_start,
+        n=args.n,
+    )
+    if not examples:
+        raise SystemExit("this strategy made no trades in the research period")
+    print(f"{len(examples)} example trades")
+    page = render_page(
+        genome.name or strategy.name,
+        explain(genome),
+        {"name": strategy.name, "id": str(strategy.id)},
+        examples,
+        metrics,
+    )
+    return page, strategy.name
+
+
+def cmd_show_trades(args: argparse.Namespace) -> None:
+    import webbrowser
+
+    page, name = asyncio.run(_show_trades(args))
+    out = Path(args.out or f"trades-{name}.html").resolve()
+    out.write_text(page, encoding="utf-8")
+    print(f"page written to {out}")
+    if not args.no_open:
+        webbrowser.open(out.as_uri())
+
+
+def cmd_labels_summary(args: argparse.Namespace) -> None:
+    """Summarise the labels downloaded from a show-trades page."""
+    import json
+
+    data = json.loads(Path(args.file).read_text(encoding="utf-8"))
+    labels = [x for x in data.get("labels", []) if x.get("choice")]
+    name = (data.get("strategy") or {}).get("name", "?")
+    print(f"{name}: {len(labels)} trades labelled")
+    groups = {"take": "La prenderei", "skip": "Non la prenderei", "zone": "Zona sbagliata"}
+    for key, title in groups.items():
+        rs = [x["r"] for x in labels if x["choice"] == key and x.get("r") is not None]
+        if not rs:
+            print(f"  {title:<17}   0")
+            continue
+        wins = sum(r > 0 for r in rs)
+        print(
+            f"  {title:<17} {len(rs):>3}  avg {sum(rs) / len(rs):+.2f}R/trade  "
+            f"total {sum(rs):+.1f}R  win {100 * wins / len(rs):.0f}%"
+        )
+    notes = [x for x in labels if (x.get("note") or "").strip()]
+    if notes:
+        print("\nNotes:")
+        for x in sorted(notes, key=lambda v: v.get("n", 0)):
+            print(f"  #{x.get('n')} {x.get('side')} {x.get('entry_time_ny')}  [{x['choice']}]")
+            print(f"     {x['note'].strip()}")
+
+
 def cmd_promote(args: argparse.Namespace) -> None:
     asyncio.run(_promote(args))
 
@@ -1307,6 +1422,20 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--holdout", type=float, default=0.2)
     p.add_argument("--folds", type=int, default=5)
     p.set_defaults(func=cmd_test_setup)
+
+    p = sub.add_parser("show-trades", help="HTML page of a setup's trades, to review and label")
+    p.add_argument("strategy", help="strategy name (AU-xxxxxx) or id, e.g. from test-setup")
+    p.add_argument("--n", type=int, default=40, help="number of example trades")
+    p.add_argument("--source", default="dukascopy")
+    p.add_argument("--start", default="2016-01-01")
+    p.add_argument("--end", default="now")
+    p.add_argument("--out", help="output HTML file (default trades-<name>.html)")
+    p.add_argument("--no-open", action="store_true", help="don't open the browser")
+    p.set_defaults(func=cmd_show_trades)
+
+    p = sub.add_parser("labels-summary", help="summarise labels downloaded from show-trades")
+    p.add_argument("file", help="the risposte-*.json file")
+    p.set_defaults(func=cmd_labels_summary)
 
     p = sub.add_parser("report", help="why a run's candidates passed or failed validation")
     p.add_argument("--run", help="run id (default: the latest run)")

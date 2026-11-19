@@ -229,3 +229,28 @@ def test_zone_stop_minimum_and_maximum_distance() -> None:
     assert not wide.entry_long[i]  # target 105.5 is < 2R away with a 3% stop
     assert not compiled(0.0, 1.0).entry_long[i]  # zone stop is 1.7% away: too wide
     assert compiled(0.0, 2.0).entry_long[i]  # 4.9 to target vs 1.7 risk: 2.9R
+
+
+def test_review_page_and_labels_summary(tmp_path, capsys) -> None:  # type: ignore[no-untyped-def]
+    import argparse
+    import json
+
+    from app.cli import cmd_labels_summary
+    from app.services.trade_charts import render_page
+
+    ex = {"id": "x|long", "n": 1, "side": "long", "r": 1.5, "bars": [], "bars_1m": []}
+    page = render_page("S/D", "LONG when </script>", {"name": "AU-1", "id": "1"}, [ex], {})
+    assert "lightweight-charts@4.2.3" in page and "<\\/script>" in page  # data can't break out
+    labels = {
+        "strategy": {"name": "AU-1"},
+        "labels": [
+            {"id": "a", "choice": "take", "r": 2.0, "n": 1},
+            {"id": "b", "choice": "take", "r": -1.0, "n": 2},
+            {"id": "c", "choice": "skip", "r": -1.0, "n": 3, "note": "too late", "side": "long"},
+        ],
+    }
+    f = tmp_path / "risposte.json"
+    f.write_text(json.dumps(labels), encoding="utf-8")
+    cmd_labels_summary(argparse.Namespace(file=str(f)))
+    out = capsys.readouterr().out
+    assert "3 trades labelled" in out and "+0.50R/trade" in out and "too late" in out
