@@ -38,6 +38,12 @@ _NICE = {
     ("sd_zones", "supply_low"): "supply zone bottom",
     ("sd_zones", "demand_target"): "demand impulse high",
     ("sd_zones", "supply_target"): "supply impulse low",
+    ("harmonics", "bull_ready"): "bullish harmonic pattern armed",
+    ("harmonics", "bear_ready"): "bearish harmonic pattern armed",
+    ("harmonics", "bull_prz_high"): "bullish PRZ top",
+    ("harmonics", "bull_prz_low"): "bullish PRZ bottom",
+    ("harmonics", "bear_prz_high"): "bearish PRZ top",
+    ("harmonics", "bear_prz_low"): "bearish PRZ bottom",
     ("candles", "bull_rejection"): "bullish rejection candle",
     ("candles", "bear_rejection"): "bearish rejection candle",
     ("candles", "bull_engulfing"): "bullish engulfing",
@@ -176,7 +182,7 @@ def explain(genome: Genome) -> str:
     elif isinstance(stop, SwingStop):
         s = f"stop beyond the last swing (length {stop.length}) + {stop.buffer_atr:g} ATR"
     elif isinstance(stop, ZoneStop):
-        s = f"stop beyond the zone + {stop.buffer_frac:.0%} of its height"
+        s = f"stop beyond the zone/X + {stop.buffer_frac:.0%} of the zone height"
         if stop.min_pct:
             s += f", at least {stop.min_pct:g}% away"
         if stop.max_pct:

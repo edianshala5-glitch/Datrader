@@ -864,14 +864,98 @@ def cmd_report(args: argparse.Namespace) -> None:
     asyncio.run(_report(args))
 
 
+def _setup_family_args(args: argparse.Namespace) -> tuple[Any, Any]:
+    from app.models.enums import DataSource
+    from engine.validation.splits import make_splits
+
+    splits = make_splits(
+        _parse_date(args.start),
+        _parse_date(args.end),
+        holdout_fraction=args.holdout,
+        n_folds=args.folds,
+    )
+    return splits, DataSource(args.source)
+
+
 async def _test_setup(args: argparse.Namespace) -> None:
     """Validate every variant of the supply/demand setup and store the results."""
+    from app.models.enums import Timeframe
+    from engine.strategy.setups import sd_zone_setup
+
+    zone_tfs = [Timeframe(t) for t in args.zone_tf]
+    variants = [(tf, c, t) for tf in zone_tfs for c in args.confirm for t in args.trend]
+
+    def trend_tfs(zone_tf: Timeframe, spec: str) -> tuple[Timeframe, ...]:
+        parts = [] if spec == "none" else spec.split("+")
+        return tuple(zone_tf if x == "micro" else Timeframe(x) for x in parts)
+
+    zone_params = {"zone_type": args.zone_type}
+    items = [
+        (
+            f"{args.zone_type} zones {tf.value} + {c}, trend {t}",
+            sd_zone_setup(
+                tf,
+                c,
+                trend=trend_tfs(tf, t),
+                zone_params=zone_params,
+                min_rr=args.min_rr,
+                min_stop_pct=args.min_stop_pct,
+                max_stop_pct=args.max_stop_pct or None,
+            ),
+        )
+        for tf, c, t in variants
+    ]
+    await _validate_family(
+        args,
+        items,
+        family=f"supply/demand setup (zones on {', '.join(t.value for t in zone_tfs)})",
+        selection="user setup (supply/demand zones)",
+    )
+
+
+async def _test_harmonics(args: argparse.Namespace) -> None:
+    """Validate harmonic-pattern variants and store the results."""
+    from app.models.enums import Timeframe
+    from engine.strategy.setups import harmonic_setup
+
+    tfs = [Timeframe(t) for t in args.pattern_tf]
+    items = []
+    for tf in tfs:
+        for confirm in args.confirm:
+            for pattern in args.pattern:
+                trend = () if args.trend == "none" else (Timeframe(args.trend),)
+                items.append(
+                    (
+                        f"harmonic {pattern} {tf.value} + {confirm}, trend {args.trend}",
+                        harmonic_setup(
+                            tf,
+                            confirm,
+                            params={"pattern": pattern, "tol": args.tol},
+                            trend=trend,
+                            min_rr=args.min_rr,
+                            min_stop_pct=args.min_stop_pct,
+                            max_stop_pct=args.max_stop_pct or None,
+                        ),
+                    )
+                )
+    await _validate_family(
+        args,
+        items,
+        family=f"harmonic patterns ({', '.join(t.value for t in tfs)})",
+        selection="harmonic patterns",
+    )
+
+
+async def _validate_family(
+    args: argparse.Namespace, items: list[tuple[str, Any]], *, family: str, selection: str
+) -> None:
+    """Validate hand-built 1m-execution genomes with honest trial counts and store them."""
     import pandas as pd
     from sqlalchemy import func, select
 
     from app.db.session import create_engine, create_sessionmaker
     from app.models import Instrument, Strategy
-    from app.models.enums import DataSource, StrategyOrigin, Timeframe
+    from app.models.enums import StrategyOrigin, Timeframe
     from app.services.seed import XAUUSD
     from app.services.validation import apply_validation, prior_oos_validations
     from engine.backtest.runner import CostConfig
@@ -879,8 +963,6 @@ async def _test_setup(args: argparse.Namespace) -> None:
     from engine.data.store import ParquetStore
     from engine.memcache import available_memory_bytes
     from engine.strategy.explain import explain
-    from engine.strategy.setups import sd_zone_setup
-    from engine.validation.splits import make_splits
     from engine.validation.validator import validate_genome
 
     if "SWARM_FEATURE_CACHE_MB" not in os.environ:
@@ -890,41 +972,16 @@ async def _test_setup(args: argparse.Namespace) -> None:
         os.environ["SWARM_FEATURE_CACHE_MB"] = str(max(384, min(4096, free // 3 // 2**20)))
 
     settings = get_settings()
-    symbol, source = args.symbol.upper(), DataSource(args.source)
+    symbol = args.symbol.upper()
+    splits, source = _setup_family_args(args)
     exec_tf = Timeframe.M1
-    zone_tfs = [Timeframe(t) for t in args.zone_tf]
-    trends = list(args.trend)
-    variants = [(tf, c, t) for tf in zone_tfs for c in args.confirm for t in trends]
-    splits = make_splits(
-        _parse_date(args.start),
-        _parse_date(args.end),
-        holdout_fraction=args.holdout,
-        n_folds=args.folds,
-    )
+    genomes = [g for _, g in items]
     store = ParquetStore(settings.data_dir / "parquet")
     warm = splits.research_start - pd.Timedelta(days=7)
     print(f"loading 1m bars {splits.research_start.date()} -> {splits.holdout_start.date()} ...")
     bars = store.read_bars(symbol, exec_tf, source=source, start=warm, end=splits.holdout_start)
     if bars.empty:
         raise SystemExit(f"no 1m bars for {symbol} ({source}); run `swarm ingest` first")
-
-    def trend_tfs(zone_tf: Timeframe, spec: str) -> tuple[Timeframe, ...]:
-        parts = [] if spec == "none" else spec.split("+")
-        return tuple(zone_tf if x == "micro" else Timeframe(x) for x in parts)
-
-    zone_params = {"zone_type": args.zone_type}
-    genomes = [
-        sd_zone_setup(
-            tf,
-            c,
-            trend=trend_tfs(tf, t),
-            zone_params=zone_params,
-            min_rr=args.min_rr,
-            min_stop_pct=args.min_stop_pct,
-            max_stop_pct=args.max_stop_pct or None,
-        )
-        for tf, c, t in variants
-    ]
     needed = {f.timeframe for g in genomes for f in g.features() if f.timeframe}
     htf_all = {
         tf: store.read_bars(symbol, tf, source=source, start=warm, end=splits.holdout_start)
@@ -959,17 +1016,15 @@ async def _test_setup(args: argparse.Namespace) -> None:
         # same out-of-sample years (re-running this command doesn't double count itself).
         n_trials = len(genomes) + prior - int(already or 0)
         print(
-            f"testing {len(genomes)} variants of the supply/demand setup on 1m bars "
-            f"(zones on {', '.join(t.value for t in zone_tfs)}); Deflated Sharpe counts "
+            f"testing {len(genomes)} variants of the {family} on 1m bars; Deflated Sharpe counts "
             f"{n_trials} trials\n"
             f"research {splits.research_start.date()} -> {splits.holdout_start.date()} "
             f"({len(splits.folds)} walk-forward periods); holdout from "
             f"{splits.holdout_start.date()} stays untouched"
         )
         summary = []
-        for (tf, confirm, trend_spec), genome in zip(variants, genomes, strict=True):
+        for label, genome in items:
             t0 = time.monotonic()
-            label = f"{args.zone_type} zones {tf.value} + {confirm}, trend {trend_spec}"
             print(f"\n... validating {label}", flush=True)
             report = await asyncio.to_thread(
                 validate_genome,
@@ -1010,7 +1065,7 @@ async def _test_setup(args: argparse.Namespace) -> None:
                     strategy,
                     report,
                     context={
-                        "selection": "user setup (supply/demand zones)",
+                        "selection": selection,
                         "variants": len(genomes),
                     },
                 )
@@ -1037,6 +1092,10 @@ async def _test_setup(args: argparse.Namespace) -> None:
         )
     if any(r.get("passed") for *_, r in summary):
         print("\nNext: `swarm promote <id>` runs the one-time holdout test on a validated variant.")
+
+
+def cmd_test_harmonics(args: argparse.Namespace) -> None:
+    asyncio.run(_test_harmonics(args))
 
 
 def cmd_test_setup(args: argparse.Namespace) -> None:
@@ -1139,7 +1198,7 @@ def cmd_labels_summary(args: argparse.Namespace) -> None:
     labels = [x for x in data.get("labels", []) if x.get("choice")]
     name = (data.get("strategy") or {}).get("name", "?")
     print(f"{name}: {len(labels)} trades labelled")
-    groups = {"take": "La prenderei", "skip": "Non la prenderei", "zone": "Zona sbagliata"}
+    groups = {"take": "La prenderei", "skip": "Non la prenderei", "zone": "Zona/pattern errato"}
     for key, title in groups.items():
         rs = [x["r"] for x in labels if x["choice"] == key and x.get("r") is not None]
         if not rs:
@@ -1436,6 +1495,35 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--holdout", type=float, default=0.2)
     p.add_argument("--folds", type=int, default=5)
     p.set_defaults(func=cmd_test_setup)
+
+    p = sub.add_parser(
+        "test-harmonics", help="validate harmonic patterns (XABCD on 5m, entry on 1m)"
+    )
+    p.add_argument("--symbol", default=settings.default_symbol)
+    p.add_argument("--source", default="dukascopy")
+    p.add_argument("--start", default="2016-01-01")
+    p.add_argument("--end", default="now")
+    p.add_argument("--pattern-tf", nargs="+", default=["5m"], choices=["5m", "15m", "30m", "1h"])
+    p.add_argument(
+        "--pattern",
+        nargs="+",
+        default=["all"],
+        choices=["all", "gartley", "bat", "butterfly", "crab", "cypher", "shark"],
+    )
+    p.add_argument(
+        "--confirm",
+        nargs="+",
+        default=["any", "rejection", "engulfing"],
+        choices=["touch", "rejection", "engulfing", "three", "any"],
+    )
+    p.add_argument("--trend", default="none", choices=["none", "1h", "4h"])
+    p.add_argument("--tol", type=float, default=0.05, help="Fibonacci ratio tolerance")
+    p.add_argument("--min-rr", type=float, default=1.0)
+    p.add_argument("--min-stop-pct", type=float, default=0.15)
+    p.add_argument("--max-stop-pct", type=float, default=0.8)
+    p.add_argument("--holdout", type=float, default=0.2)
+    p.add_argument("--folds", type=int, default=5)
+    p.set_defaults(func=cmd_test_harmonics)
 
     p = sub.add_parser("show-trades", help="HTML page of a setup's trades, to review and label")
     p.add_argument("strategy", help="strategy name (AU-xxxxxx) or id, e.g. from test-setup")

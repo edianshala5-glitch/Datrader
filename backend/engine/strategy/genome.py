@@ -34,6 +34,19 @@ from engine.indicators import FeatureRef, OutputKind, get_spec
 from engine.indicators.base import relevant_params
 
 MAX_DEPTH = 3
+# Indicators that define a trade zone, for ZoneStop / ZoneTarget:
+#   side -> (stop reference, zone low, zone high, target)
+ZONE_PROVIDERS: dict[str, dict[str, tuple[str, str, str, str]]] = {
+    "sd_zones": {
+        "long": ("demand_low", "demand_low", "demand_high", "demand_target"),
+        "short": ("supply_high", "supply_low", "supply_high", "supply_target"),
+    },
+    "harmonics": {
+        "long": ("bull_stop", "bull_prz_low", "bull_prz_high", "bull_target"),
+        "short": ("bear_stop", "bear_prz_low", "bear_prz_high", "bear_target"),
+    },
+}
+
 MAX_CONDITIONS = 12  # budget for evolved and meta-refined genomes
 HARD_MAX_CONDITIONS = 16  # any genome, including hand-written setups
 
@@ -362,13 +375,16 @@ class Genome(_Strict):
             raise ValueError(f"{total} conditions exceed the limit of {HARD_MAX_CONDITIONS}")
         uses_zone = isinstance(self.exit.stop, ZoneStop) or isinstance(self.exit.target, ZoneTarget)
         if uses_zone and self.zone_feature() is None:
-            raise ValueError("zone stop/target needs an sd_zones feature in the entry conditions")
+            raise ValueError(
+                "zone stop/target needs a zone feature (sd_zones or harmonics) in the entries"
+            )
         return self
 
     def zone_feature(self) -> FeatureSpec | None:
-        """The ``sd_zones`` feature the entries use (zone stops/targets read the same zone)."""
+        """The zone feature (``sd_zones`` / ``harmonics``) the entries use; zone stops and
+        targets read the same zone."""
         zones = sorted(
-            (f for f in self.features() if f.indicator == "sd_zones"),
+            (f for f in self.features() if f.indicator in ZONE_PROVIDERS),
             key=lambda f: (str(f.timeframe), sorted(f.params.items())),
         )
         return zones[0] if zones else None

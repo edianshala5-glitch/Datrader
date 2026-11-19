@@ -19,7 +19,7 @@ from app.models.enums import Timeframe
 from engine.backtest.runner import CostConfig, run_backtest
 from engine.data.calendar import MarketCalendar
 from engine.strategy.compiler import FeatureProvider
-from engine.strategy.genome import Genome
+from engine.strategy.genome import ZONE_PROVIDERS, Genome
 
 NY = "America/New_York"
 
@@ -66,7 +66,7 @@ def build_examples(
     """Backtest ``genome`` on [start, end) and package ``n`` trades spread over the period."""
     zone = genome.zone_feature()
     if zone is None or zone.timeframe is None:
-        raise ValueError("show-trades needs a zone setup (sd_zones feature on a higher timeframe)")
+        raise ValueError("show-trades needs a zone or harmonic setup on a higher timeframe")
     zone_tf = zone.timeframe
     bars_1m = bars_1m.reset_index(drop=True)
     fp = FeatureProvider(bars_1m, Timeframe.M1, calendar, sessions, htf_bars)
@@ -92,10 +92,15 @@ def build_examples(
     def level(output: str) -> np.ndarray:
         return fp.get(zone.model_copy(update={"output": output}))
 
-    levels = {
-        side: (level(f"{z}_low"), level(f"{z}_high"))
-        for side, z in (("long", "demand"), ("short", "supply"))
-    }
+    provider = ZONE_PROVIDERS[zone.indicator]
+    levels = {side: (level(provider[side][1]), level(provider[side][2])) for side in provider}
+    pivots: dict[str, list[tuple[str, np.ndarray, np.ndarray]]] = {}
+    if zone.indicator == "harmonics":
+        for side, pre in (("long", "bull"), ("short", "bear")):
+            pivots[side] = [
+                (name.upper(), level(f"{pre}_{name}"), level(f"{pre}_{name}_idx"))
+                for name in "xabc"
+            ]
     # Spread the sample over the whole period instead of taking the first n trades.
     picks = np.unique(np.linspace(0, len(trades) - 1, min(n, len(trades))).round().astype(int))
     rng = np.random.default_rng(seed)
@@ -120,6 +125,26 @@ def build_examples(
         b = min(len(zbars), int(zts.searchsorted(exit_ts)) + 12)
         e = int(ts.searchsorted(entry_ts))
         m1 = bars_1m.iloc[max(0, e - 45) : min(len(bars_1m), e + 30)]
+        points = []
+        for label, price_arr, idx_arr in pivots.get(side, []):
+            j = idx_arr[sig]
+            if np.isfinite(j) and 0 <= int(j) < len(zbars):
+                points.append(
+                    {
+                        "time": _ny_secs(zts[int(j)]),
+                        "value": round(float(price_arr[sig]), 2),
+                        "label": label,
+                    }
+                )
+                a = min(a, max(0, int(j) - 10))  # keep X in view
+        if points:
+            points.append(
+                {
+                    "time": _ny_secs(entry_ts),
+                    "value": round(float(t["entry_price"]), 2),
+                    "label": "D",
+                }
+            )
         target, r = float(t["target_price"]), float(t["r"])
         out.append(
             {
@@ -142,6 +167,7 @@ def build_examples(
                 "entry_time": _ny_secs(entry_ts),
                 "exit_time": _ny_secs(exit_ts),
                 "zone_tf": zone_tf.value,
+                "pivots": points,
                 "bars": _bars_payload(zbars.iloc[a:b]),
                 "bars_1m": _bars_payload(m1),
             }
@@ -259,7 +285,7 @@ document.getElementById("intro").innerHTML =
    <p><b>Alla cieca:</b> prima del voto vedi il grafico solo fino al momento dell'entrata, come dal
    vivo. Dopo il voto compaiono il resto del grafico e il risultato.</p>
    <p>Per ogni trade scegli: <b>La prenderei</b>, <b>Non la prenderei</b> oppure
-   <b>Zona sbagliata</b> (la zona non è come la disegneresti tu), e se vuoi aggiungi una nota.
+   <b>Zona/pattern sbagliato</b> (non è come lo disegneresti tu), e se vuoi aggiungi una nota.
    Le risposte restano salvate in questo browser. Alla fine premi <b>Scarica le mie risposte</b>.</p>
    <p class="muted">Regola: <code>${D.rule}</code></p>`;
 
@@ -287,6 +313,15 @@ function chart(el, allBars, ex, oneMin, revealed) {
                                   lastValueVisible: false, crosshairMarkerVisible: false });
       z.setData(inZone.map(t => ({ time: t, value: p })));
     }
+  }
+  if (!oneMin && ex.pivots && ex.pivots.length) {
+    const pts = ex.pivots.filter(pt => revealed || pt.label !== "D");
+    const ln = c.addLineSeries({ color: "#e3b341", lineWidth: 2, priceLineVisible: false,
+                                 lastValueVisible: false, crosshairMarkerVisible: false });
+    const seen = new Set(); const data = [];
+    for (const pt of pts) { if (!seen.has(pt.time)) { seen.add(pt.time); data.push({ time: pt.time, value: pt.value }); } }
+    ln.setData(data);
+    ln.setMarkers(pts.map(pt => ({ time: pt.time, position: "inBar", color: "#e3b341", shape: "circle", text: pt.label })));
   }
   cs.createPriceLine({ price: ex.entry, color: C.entry, lineWidth: 1, lineStyle: 2, title: "entry" });
   cs.createPriceLine({ price: ex.stop, color: C.stop, lineWidth: 1, lineStyle: 2, title: "stop" });
@@ -325,7 +360,7 @@ function render() {
       <div class="vote">
         <button data-v="take" class="take">La prenderei</button>
         <button data-v="skip" class="skip">Non la prenderei</button>
-        <button data-v="zone" class="zone">Zona sbagliata</button>
+        <button data-v="zone" class="zone">Zona/pattern sbagliato</button>
         <input type="text" placeholder="Nota (facoltativa): cosa faresti diversamente?"></div>`;
     root.appendChild(card);
     const [big, small] = card.querySelectorAll(".chart");

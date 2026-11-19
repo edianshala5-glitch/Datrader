@@ -23,6 +23,7 @@ from engine.indicators.smc import _ffill
 from engine.indicators.standard import atr_values
 from engine.memcache import BoundedCache, cache_budget_bytes
 from engine.strategy.genome import (
+    ZONE_PROVIDERS,
     AtrStop,
     AtrTarget,
     Compare,
@@ -234,6 +235,12 @@ def flat_bars(
     return np.asarray(gap | closed)
 
 
+def _zone_outputs(genome: Genome, side: str) -> tuple[str, str, str, str]:
+    spec = genome.zone_feature()
+    assert spec is not None  # guaranteed by Genome validation
+    return ZONE_PROVIDERS[spec.indicator][side]
+
+
 def _zone(genome: Genome, fp: FeatureProvider, output: str) -> FloatArray:
     """A level of the zone the entry conditions use, aligned to the strategy's bars."""
     spec = genome.zone_feature()
@@ -272,11 +279,11 @@ def compile_genome(genome: Genome, fp: FeatureProvider) -> Signals:
             lvl_l = np.where(too_wide_l | (lvl_l >= close), np.nan, lvl_l)
             lvl_s = np.where(too_wide_s | (lvl_s <= close), np.nan, lvl_s)
     elif isinstance(stop, ZoneStop):
-        d_lo, d_hi = _zone(genome, fp, "demand_low"), _zone(genome, fp, "demand_high")
-        s_lo, s_hi = _zone(genome, fp, "supply_low"), _zone(genome, fp, "supply_high")
+        ref_l, d_lo, d_hi, _ = (_zone(genome, fp, o) for o in _zone_outputs(genome, "long"))
+        ref_s, s_lo, s_hi, _ = (_zone(genome, fp, o) for o in _zone_outputs(genome, "short"))
         with np.errstate(invalid="ignore"):
-            lvl_l = d_lo - stop.buffer_frac * (d_hi - d_lo)
-            lvl_s = s_hi + stop.buffer_frac * (s_hi - s_lo)
+            lvl_l = ref_l - stop.buffer_frac * (d_hi - d_lo)
+            lvl_s = ref_s + stop.buffer_frac * (s_hi - s_lo)
             if stop.min_pct > 0:
                 lvl_l = np.minimum(lvl_l, close * (1 - stop.min_pct / 100))
                 lvl_s = np.maximum(lvl_s, close * (1 + stop.min_pct / 100))
@@ -298,8 +305,8 @@ def compile_genome(genome: Genome, fp: FeatureProvider) -> Signals:
     if isinstance(tgt, ZoneTarget):
         # Distance from the decision close to the impulse extreme (fills at the next open).
         with np.errstate(invalid="ignore"):
-            t_dist_l = _zone(genome, fp, "demand_target") - close
-            t_dist_s = close - _zone(genome, fp, "supply_target")
+            t_dist_l = _zone(genome, fp, _zone_outputs(genome, "long")[3]) - close
+            t_dist_s = close - _zone(genome, fp, _zone_outputs(genome, "short")[3])
             risk_l = np.where(np.isnan(lvl_l), dist_l, close - lvl_l)
             risk_s = np.where(np.isnan(lvl_s), dist_s, lvl_s - close)
             valid_l &= (t_dist_l > 0) & (t_dist_l >= tgt.min_rr * risk_l)

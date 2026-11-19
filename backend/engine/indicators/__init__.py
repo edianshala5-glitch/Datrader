@@ -2,6 +2,7 @@
 
 from engine.indicators import (  # noqa: F401  (registration side effects)
     context,
+    harmonics,
     smc,
     standard,
     zones,

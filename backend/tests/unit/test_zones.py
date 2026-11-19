@@ -149,7 +149,7 @@ def test_zone_stop_requires_a_zone_feature() -> None:
     import pytest
     from pydantic import ValidationError
 
-    with pytest.raises(ValidationError, match="needs an sd_zones feature"):
+    with pytest.raises(ValidationError, match="needs a zone feature"):
         Genome.model_validate(
             {
                 "entry_long": {
