@@ -256,12 +256,18 @@ document.getElementById("intro").innerHTML =
    <span><i class="sw" style="background:${C.entry}"></i>entrata</span>
    <span><i class="sw" style="background:${C.stop}"></i>stop</span>
    <span><i class="sw" style="background:${C.target}"></i>target</span></p>
+   <p><b>Alla cieca:</b> prima del voto vedi il grafico solo fino al momento dell'entrata, come dal
+   vivo. Dopo il voto compaiono il resto del grafico e il risultato.</p>
    <p>Per ogni trade scegli: <b>La prenderei</b>, <b>Non la prenderei</b> oppure
    <b>Zona sbagliata</b> (la zona non è come la disegneresti tu), e se vuoi aggiungi una nota.
    Le risposte restano salvate in questo browser. Alla fine premi <b>Scarica le mie risposte</b>.</p>
    <p class="muted">Regola: <code>${D.rule}</code></p>`;
 
-function chart(el, bars, ex, oneMin) {
+function chart(el, allBars, ex, oneMin, revealed) {
+  el.querySelectorAll(".tv-lightweight-charts").forEach(n => n.remove());
+  // Blind until voted: only what a trader saw at the moment of entry.
+  const tf = oneMin ? 60 : ({ "5m": 300, "15m": 900, "30m": 1800, "1h": 3600 }[ex.zone_tf] || 900);
+  const bars = revealed ? allBars : allBars.filter(b => b.time + tf <= ex.entry_time);
   const c = LightweightCharts.createChart(el, {
     layout: { background: { color: "#1a1a19" }, textColor: C.text, fontSize: 12 },
     grid: { vertLines: { color: C.grid }, horzLines: { color: C.grid } },
@@ -291,7 +297,7 @@ function chart(el, bars, ex, oneMin) {
   const marks = [{ time: snap(ex.entry_time), position: ex.side === "long" ? "belowBar" : "aboveBar",
                    color: ex.side === "long" ? C.up : C.down,
                    shape: ex.side === "long" ? "arrowUp" : "arrowDown", text: "entry" }];
-  if (!oneMin || ex.exit_time <= times[times.length - 1])
+  if (revealed && (!oneMin || ex.exit_time <= times[times.length - 1]))
     marks.push({ time: snap(ex.exit_time), position: "inBar", color: "#c3c2b7", shape: "circle",
                  text: "exit" });
   marks.sort((a, b) => a.time - b.time);
@@ -306,12 +312,13 @@ function render() {
     const card = document.createElement("section");
     card.className = "card";
     const res = ex.r == null ? "" : `<span class="${ex.r > 0 ? "win" : "loss"}">${fmtR(ex.r)}</span>`;
+    const outcome = `esito: ${reasons[ex.exit_reason] || ex.exit_reason} ${res}`;
     card.innerHTML = `
       <div class="head"><span class="t">#${ex.n}</span>
         <span class="${ex.side}">${ex.side === "long" ? "LONG" : "SHORT"}</span>
         <span>${ex.entry_time_ny}</span>
         <span class="muted">entry ${ex.entry} · stop ${ex.stop} · target ${ex.target ?? "–"}</span>
-        <span>esito: ${reasons[ex.exit_reason] || ex.exit_reason} ${res}</span></div>
+        <span class="out"></span></div>
       <div class="charts">
         <div class="chart"><span class="lbl">${ex.zone_tf} · zona e trade</span></div>
         <div class="chart"><span class="lbl">1m · entrata</span></div></div>
@@ -322,8 +329,16 @@ function render() {
         <input type="text" placeholder="Nota (facoltativa): cosa faresti diversamente?"></div>`;
     root.appendChild(card);
     const [big, small] = card.querySelectorAll(".chart");
-    chart(big, ex.bars, ex, false);
-    chart(small, ex.bars_1m, ex, true);
+    const out = card.querySelector(".out");
+    let shown = null;
+    const draw = () => {
+      const revealed = !!(labels[ex.id] && labels[ex.id].choice);
+      if (shown === revealed) return;
+      shown = revealed;
+      chart(big, ex.bars, ex, false, revealed);
+      chart(small, ex.bars_1m, ex, true, revealed);
+      out.innerHTML = revealed ? outcome : '<span class="muted">esito nascosto finché non voti</span>';
+    };
     const btns = card.querySelectorAll("button[data-v]");
     const note = card.querySelector("input");
     const paint = () => {
@@ -331,6 +346,7 @@ function render() {
       btns.forEach(b => b.classList.toggle("on", !!l && l.choice === b.dataset.v));
       card.classList.toggle("done", !!l && !!l.choice);
       note.value = (l && l.note) || "";
+      draw();
       count();
     };
     btns.forEach(b => b.addEventListener("click", () => {
