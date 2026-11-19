@@ -57,7 +57,7 @@ function LeaderboardInner() {
         <div className="flex flex-wrap items-end gap-3">
           <Field label="Timeframe">
             <select className={inputCls} value={get("timeframe")} onChange={(e) => update("timeframe", e.target.value)}>
-              <option value="">all</option>{["5m", "15m", "30m", "1h"].map((t) => <option key={t}>{t}</option>)}
+              <option value="">all</option>{["1m", "5m", "15m", "30m", "1h"].map((t) => <option key={t}>{t}</option>)}
             </select>
           </Field>
           <Field label="Min OOS trades"><input className={`${inputCls} w-24`} type="number" value={get("min_trades")} onChange={(e) => update("min_trades", e.target.value)} /></Field>
