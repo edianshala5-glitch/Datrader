@@ -254,3 +254,32 @@ def test_review_page_and_labels_summary(tmp_path, capsys) -> None:  # type: igno
     cmd_labels_summary(argparse.Namespace(file=str(f)))
     out = capsys.readouterr().out
     assert "3 trades labelled" in out and "+0.50R/trade" in out and "too late" in out
+
+
+def test_order_block_mode_needs_an_aggressive_move() -> None:
+    ob = {**PARAMS, "zone_type": "ob"}
+    rows = WARM + SETUP + SLOW + TOUCH
+    inp = Inputs.from_bars(_bars(rows), Timeframe.M15)
+    z = compute(inp, "sd_zones", ob)
+    bos = 20 + 9
+    # OB = the last down candle at the origin (bar 7: 99.0 .. 100.2, full range)
+    assert z["demand_low"][bos] == 99.0 and z["demand_high"][bos] == 100.2
+    assert z["demand_ready"][20 + len(SETUP) + len(SLOW) - 1]
+
+    # Same swing, but price grinds up in small candles: no displacement, no order block.
+    grind = [(99.6 + 0.4 * k, 100.1 + 0.4 * k, 99.5 + 0.4 * k, 100.0 + 0.4 * k) for k in range(12)]
+    slow_rows = WARM + SETUP[:8] + grind + SLOW + TOUCH
+    slow_inp = Inputs.from_bars(_bars(slow_rows), Timeframe.M15)
+    assert not np.isfinite(compute(slow_inp, "sd_zones", ob)["demand_low"]).any()
+    base = compute(slow_inp, "sd_zones", {**PARAMS, "impulse_atr": 1.0})
+    assert np.isfinite(base["demand_low"]).any()  # the plain base zone still forms
+
+
+def test_touch_entry_and_micro_trend() -> None:
+    g = sd_zone_setup(Timeframe.M15, "touch", zone_params={"zone_type": "ob"})
+    text = explain(g)
+    assert "15m market-structure trend is bullish" in text  # micro trend = zone timeframe
+    assert "confirmation candle" not in text and "rejection" not in text
+    assert g.name == "OB 15m + touch, trend 15m"
+    g2 = sd_zone_setup(Timeframe.M5, "any", trend=(Timeframe.M5, Timeframe.H4))
+    assert "4h market-structure trend" in explain(g2) and "5m market-structure" in explain(g2)

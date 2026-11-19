@@ -3,9 +3,11 @@ promotion and live pipeline as evolved strategies.
 
 ``sd_zone_setup`` encodes the user's discretionary trade:
 
-    supply/demand zone whose swing broke structure (BOS)  ->  slow, stair-stepped pullback
-    ->  price reaches the zone  ->  confirmation candle on the execution timeframe (1m)
-    ->  entry; stop beyond the zone; target at the impulse extreme.
+    zone whose swing broke structure (BOS); with ``zone_type="ob"`` an aggressive order
+    block left by a displacement  ->  pullback  ->  retest of the zone  ->  optional
+    confirmation candle on the execution timeframe (1m)  ->  entry; stop beyond the zone;
+    target at the impulse extreme. Only with the market-structure trend of the zone
+    timeframe ("micro" trend) and optionally of higher timeframes.
 """
 
 from __future__ import annotations
@@ -15,11 +17,12 @@ from typing import Any, Literal
 from app.models.enums import Timeframe
 from engine.strategy.genome import Genome
 
-Confirm = Literal["rejection", "engulfing", "three", "any"]
-CONFIRMS: tuple[Confirm, ...] = ("rejection", "engulfing", "three", "any")
+Confirm = Literal["touch", "rejection", "engulfing", "three", "any"]
+CONFIRMS: tuple[Confirm, ...] = ("touch", "rejection", "engulfing", "three", "any")
 # Bars back (on the execution timeframe) in which price must have touched the zone. Three
 # candles in a row need room: the touch is usually on the first of them.
-_TOUCH_LOOKBACK = {"rejection": 0, "engulfing": 1, "three": 2, "any": 2}
+# "touch" enters on the retest itself (no confirmation candle).
+_TOUCH_LOOKBACK = {"touch": 0, "rejection": 0, "engulfing": 1, "three": 2, "any": 2}
 
 
 def _zone(output: str, tf: Timeframe, params: dict[str, Any]) -> dict[str, Any]:
@@ -32,7 +35,7 @@ def _side(
     confirm: Confirm,
     zone_params: dict[str, Any],
     wick_ratio: float,
-    trend_tf: Timeframe | None,
+    trend: tuple[Timeframe, ...],
 ) -> dict[str, Any]:
     side = "demand" if long else "supply"
     near, far = ("high", "low") if long else ("low", "high")
@@ -48,26 +51,33 @@ def _side(
         for k in range(_TOUCH_LOOKBACK[confirm] + 1)
     ]
     pattern = f"{'bull' if long else 'bear'}_{confirm}"
-    trend = (
-        [  # only trade with the higher-timeframe market structure
+    trend_conds = [  # only trade with the market structure of these timeframes
+        {
+            "type": "state",
+            "feature": {"indicator": "structure", "output": "trend", "timeframe": t.value},
+            "values": [1 if long else -1],
+        }
+        for t in trend
+    ]
+    confirmation = (
+        []
+        if confirm == "touch"
+        else [
             {
-                "type": "state",
+                "type": "event",
                 "feature": {
-                    "indicator": "structure",
-                    "output": "trend",
-                    "timeframe": trend_tf.value,
+                    "indicator": "candles",
+                    "output": pattern,
+                    "params": {"wick_ratio": wick_ratio},
                 },
-                "values": [1 if long else -1],
             }
         ]
-        if trend_tf is not None
-        else []
     )
     return {
         "type": "group",
         "op": "all",
         "conditions": [
-            *trend,
+            *trend_conds,
             {"type": "flag", "feature": _zone(f"{side}_ready", tf, zone_params)},
             touched[0]
             if len(touched) == 1
@@ -78,14 +88,7 @@ def _side(
                 "op": hold_op,
                 "right": {"kind": "feature", "feature": _zone(f"{side}_{far}", tf, zone_params)},
             },
-            {
-                "type": "event",
-                "feature": {
-                    "indicator": "candles",
-                    "output": pattern,
-                    "params": {"wick_ratio": wick_ratio},
-                },
-            },
+            *confirmation,
         ],
     }
 
@@ -96,7 +99,7 @@ def sd_zone_setup(
     *,
     zone_params: dict[str, Any] | None = None,
     wick_ratio: float = 2.0,
-    trend_tf: Timeframe | None = Timeframe.H4,
+    trend: tuple[Timeframe, ...] | None = None,
     buffer_frac: float = 0.1,
     min_stop_pct: float = 0.3,
     max_stop_pct: float | None = 0.6,
@@ -104,18 +107,22 @@ def sd_zone_setup(
     flat_at: Literal["daily", "weekend", "none"] = "daily",
 ) -> Genome:
     """The supply/demand setup, run on the execution timeframe (1m) with zones from
-    ``zone_tf``, trading only with the ``trend_tf`` market structure (None = no filter).
+    ``zone_tf``, trading only with the market-structure trend of every timeframe in
+    ``trend`` (default: the zone timeframe itself, the "micro" trend; () = no filter).
     ``zone_params`` override ``sd_zones`` defaults (swing length, impulse size, approach
     bars, max candle size, stair steps, zone age, touch window, zones tracked).
 
     Stops sit beyond the zone but at least ``min_stop_pct`` % of price away (0.3% is about
     $8 with gold at 2,650); setups needing more than ``max_stop_pct`` % are skipped."""
     zp = dict(zone_params or {})
+    tr = (zone_tf,) if trend is None else trend
+    kind = "OB" if zp.get("zone_type") == "ob" else "S/D zone"
+    trend_txt = "+".join(t.value for t in tr) or "none"
     return Genome.model_validate(
         {
-            "name": f"S/D zone {zone_tf.value} + {confirm}",
-            "entry_long": _side(True, zone_tf, confirm, zp, wick_ratio, trend_tf),
-            "entry_short": _side(False, zone_tf, confirm, zp, wick_ratio, trend_tf),
+            "name": f"{kind} {zone_tf.value} + {confirm}, trend {trend_txt}",
+            "entry_long": _side(True, zone_tf, confirm, zp, wick_ratio, tr),
+            "entry_short": _side(False, zone_tf, confirm, zp, wick_ratio, tr),
             "exit": {
                 "stop": {
                     "type": "zone",

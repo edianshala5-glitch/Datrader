@@ -893,7 +893,8 @@ async def _test_setup(args: argparse.Namespace) -> None:
     symbol, source = args.symbol.upper(), DataSource(args.source)
     exec_tf = Timeframe.M1
     zone_tfs = [Timeframe(t) for t in args.zone_tf]
-    variants = [(tf, c) for tf in zone_tfs for c in args.confirm]
+    trends = list(args.trend)
+    variants = [(tf, c, t) for tf in zone_tfs for c in args.confirm for t in trends]
     splits = make_splits(
         _parse_date(args.start),
         _parse_date(args.end),
@@ -906,17 +907,23 @@ async def _test_setup(args: argparse.Namespace) -> None:
     bars = store.read_bars(symbol, exec_tf, source=source, start=warm, end=splits.holdout_start)
     if bars.empty:
         raise SystemExit(f"no 1m bars for {symbol} ({source}); run `swarm ingest` first")
-    trend_tf = None if args.trend_tf == "none" else Timeframe(args.trend_tf)
+
+    def trend_tfs(zone_tf: Timeframe, spec: str) -> tuple[Timeframe, ...]:
+        parts = [] if spec == "none" else spec.split("+")
+        return tuple(zone_tf if x == "micro" else Timeframe(x) for x in parts)
+
+    zone_params = {"zone_type": args.zone_type}
     genomes = [
         sd_zone_setup(
             tf,
             c,
-            trend_tf=trend_tf,
+            trend=trend_tfs(tf, t),
+            zone_params=zone_params,
             min_rr=args.min_rr,
             min_stop_pct=args.min_stop_pct,
             max_stop_pct=args.max_stop_pct or None,
         )
-        for tf, c in variants
+        for tf, c, t in variants
     ]
     needed = {f.timeframe for g in genomes for f in g.features() if f.timeframe}
     htf_all = {
@@ -960,9 +967,10 @@ async def _test_setup(args: argparse.Namespace) -> None:
             f"{splits.holdout_start.date()} stays untouched"
         )
         summary = []
-        for (tf, confirm), genome in zip(variants, genomes, strict=True):
+        for (tf, confirm, trend_spec), genome in zip(variants, genomes, strict=True):
             t0 = time.monotonic()
-            print(f"\n... validating zones {tf.value} + {confirm} confirmation", flush=True)
+            label = f"{args.zone_type} zones {tf.value} + {confirm}, trend {trend_spec}"
+            print(f"\n... validating {label}", flush=True)
             report = await asyncio.to_thread(
                 validate_genome,
                 genome,
@@ -1009,21 +1017,21 @@ async def _test_setup(args: argparse.Namespace) -> None:
                 await session.commit()
                 name, sid = strategy.name, str(strategy.id)
             print_candidate(
-                f"{name}  [zones {tf.value} + {confirm}]  ({time.monotonic() - t0:.0f}s)",
+                f"{name}  [{label}]  ({time.monotonic() - t0:.0f}s)",
                 explain(genome),
                 rep,
                 "first training window",
             )
-            summary.append((name, sid, tf.value, confirm, rep))
+            summary.append((name, sid, label, rep))
     finally:
         await engine.dispose()
 
     print("\nSummary")
-    for name, sid, tf_v, confirm, rep in summary:
+    for name, sid, label, rep in summary:
         oos = rep.get("oos") or {}
         mark = "VALIDATED" if rep.get("passed") else "rejected "
         print(
-            f"  {mark}  {name}  zones {tf_v:<3} + {confirm:<9}  "
+            f"  {mark}  {name}  {label:<38}  "
             f"{oos.get('n_trades', 0):>4} trades  "
             f"{_fmt_r(oos.get('expectancy_r'))}/trade  DSR {rep.get('dsr') or 0:.3f}  id {sid}"
         )
@@ -1408,13 +1416,19 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument(
         "--confirm",
         nargs="+",
-        default=["rejection", "engulfing", "three", "any"],
-        choices=["rejection", "engulfing", "three", "any"],
+        default=["touch", "any"],
+        choices=["touch", "rejection", "engulfing", "three", "any"],
+        help="touch = enter on the retest itself",
+    )
+    p.add_argument("--zone-type", default="ob", choices=["ob", "base"])
+    p.add_argument(
+        "--trend",
+        nargs="+",
+        default=["micro+4h"],
+        help="trend filters to try; micro = zone timeframe. Default micro+4h: micro and macro "
+        "trend must agree. Others: micro, micro+1h, micro+1h+4h, 4h, none",
     )
     p.add_argument("--min-rr", type=float, default=1.0, help="skip trades with reward/risk below")
-    p.add_argument(
-        "--trend-tf", default="4h", choices=["1h", "4h", "1d", "none"], help="trade with this trend"
-    )
     p.add_argument("--min-stop-pct", type=float, default=0.3, help="minimum stop, %% of price")
     p.add_argument(
         "--max-stop-pct", type=float, default=0.6, help="skip wider stops (%% of price; 0 = off)"

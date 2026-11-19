@@ -25,6 +25,8 @@ bar close with confirmed swings, so the values at bar ``t`` use only bars ``<= t
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 from numba import njit
 
@@ -60,6 +62,9 @@ def _demand_zones(  # type: ignore[no-untyped-def]
     max_age,
     touch_bars,
     max_zones,
+    ob_mode,
+    displacement_atr,
+    max_leg_bars,
 ):
     """Track up to ``max_zones`` demand zones at once; output the nearest one below price,
     preferring zones whose pullback qualifies as slow ("ready")."""
@@ -97,31 +102,49 @@ def _demand_zones(  # type: ignore[no-untyped-def]
             level = NAN  # this swing high is broken; wait for the next one
             level_pivot = -1
             a = atr[i]
-            if not np.isnan(a) and a > 0 and (c[i] - lo[b]) >= impulse_atr * a:
-                top = max(o[b], c[b])
-                if top - lo[b] < 0.1 * a:  # doji base: use its high instead
-                    top = h[b]
-                if top < c[i]:
-                    slot = -1
-                    for s in range(k):
-                        if not alive[s]:
+            valid = not np.isnan(a) and a > 0 and (c[i] - lo[b]) >= impulse_atr * a
+            bottom = lo[b]
+            top = max(o[b], c[b])
+            if valid and ob_mode:
+                # Order block: the last down candle at the origin of the move (up to 3 bars
+                # before the low), spanning its full range plus the sweep low.
+                ob = b
+                for j in range(b, max(b - 3, 0) - 1, -1):
+                    if c[j] < o[j]:
+                        ob = j
+                        break
+                top = h[ob]
+                bottom = min(lo[ob], lo[b])
+                # Aggressive: a big-bodied candle in the leg, and the break comes quickly.
+                biggest_body = 0.0
+                for j in range(ob + 1, i + 1):
+                    body = c[j] - o[j]
+                    if body > biggest_body:
+                        biggest_body = body
+                valid = biggest_body >= displacement_atr * a and (i - b) <= max_leg_bars
+            elif valid and top - lo[b] < 0.1 * a:  # doji base: use its high instead
+                top = h[b]
+            if valid and top < c[i]:
+                slot = -1
+                for s in range(k):
+                    if not alive[s]:
+                        slot = s
+                        break
+                if slot < 0:
+                    slot = 0
+                    for s in range(1, k):
+                        if created[s] < created[slot]:
                             slot = s
-                            break
-                    if slot < 0:
-                        slot = 0
-                        for s in range(1, k):
-                            if created[s] < created[slot]:
-                                slot = s
-                    alive[slot] = True
-                    zl[slot], zh[slot] = lo[b], top
-                    created[slot] = i
-                    peak[slot], peak_bar[slot] = h[b], b
-                    for j in range(b, i + 1):
-                        if h[j] >= peak[slot]:
-                            peak[slot], peak_bar[slot] = h[j], j
-                    touched[slot] = False
-                    touch_bar[slot] = -1
-                    frozen[slot] = False
+                alive[slot] = True
+                zl[slot], zh[slot] = bottom, top
+                created[slot] = i
+                peak[slot], peak_bar[slot] = h[b], b
+                for j in range(b, i + 1):
+                    if h[j] >= peak[slot]:
+                        peak[slot], peak_bar[slot] = h[j], j
+                touched[slot] = False
+                touch_bar[slot] = -1
+                frozen[slot] = False
 
         # --- update every live zone
         for s in range(k):
@@ -184,13 +207,19 @@ ZONE_PARAMS = {
     "max_age": Param(300, 10, 2000, 1),
     "touch_bars": Param(2, 1, 10, 1),
     "max_zones": Param(3, 1, 10, 1),  # zones per side tracked at the same time
+    # "base": zone = base candle (low .. body top). "ob": aggressive order block = last down
+    # candle before a displacement (big body >= displacement_atr x ATR, BOS within
+    # max_leg_bars of the low), full candle range.
+    "zone_type": Param("base", choices=("base", "ob")),
+    "displacement_atr": Param(1.0, 0.2, 4.0, 0.1),
+    "max_leg_bars": Param(12, 2, 60, 1),
 }
 _PRICE = Output(OutputKind.PRICE)
 _WICK = ("wick_ratio",)
 _FLAG = Output(OutputKind.FLAG)
 
 
-def sd_zone_values(inp: Inputs, **p: float) -> Outputs:
+def sd_zone_values(inp: Inputs, **p: Any) -> Outputs:
     """All zone outputs. ``compute`` caches the result per parameter set."""
     atr = atr_values(inp, 14)
     args = (
@@ -201,6 +230,9 @@ def sd_zone_values(inp: Inputs, **p: float) -> Outputs:
         int(p["max_age"]),
         int(p["touch_bars"]),
         int(p["max_zones"]),
+        p["zone_type"] == "ob",
+        float(p["displacement_atr"]),
+        int(p["max_leg_bars"]),
     )
     length = int(p["length"])
     sh_e, _, sh_p, _, sh_i, _ = confirmed_swings(inp.high, inp.low, length, length)
@@ -242,7 +274,7 @@ def sd_zone_values(inp: Inputs, **p: float) -> Outputs:
         "pulls back slowly (small candles, enough bars, stair steps). Target = impulse extreme."
     ),
 )
-def _sd_zones(inp: Inputs, **p: float) -> Outputs:
+def _sd_zones(inp: Inputs, **p: Any) -> Outputs:
     return sd_zone_values(inp, **p)
 
 
